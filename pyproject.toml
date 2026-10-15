@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taskbot-foundation"
+version = "0.1.0"
+description = "Telegram Taskbot application through Phase 3 task workflow"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "sqlalchemy[asyncio]>=2.0,<3",
+    "asyncpg>=0.30,<1",
+    "alembic>=1.13,<2",
+    "pydantic-settings>=2.5,<3",
+    "aiogram>=3.0,<4",
+    "httpx>=0.27,<1",
+    "tzdata>=2025.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "aiosqlite>=0.20,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["apps/api", "apps/bot", "apps/worker"]
+include = ["taskbot_api*", "taskbot_bot*", "taskbot_worker*"]
+
+[tool.pytest.ini_options]
+testpaths = ["apps/api/tests"]
+addopts = "-ra"
+
