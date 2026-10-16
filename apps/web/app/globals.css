@@ -1,8 +1,8 @@
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
   font-family: Arial, Helvetica, sans-serif;
-  background: #f5f7fb;
-  color: #172033;
+  background: var(--tg-theme-bg-color, #f5f7fb);
+  color: var(--tg-theme-text-color, #172033);
 }
 
 * {
@@ -21,16 +21,27 @@ main {
 
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; margin: .2rem; padding: .4rem .7rem; }
+button { min-height: 2.5rem; }
 button:disabled { cursor: not-allowed; opacity: .55; }
 input, select, textarea { display: block; width: 100%; padding: .4rem; margin-top: .25rem; }
 textarea { min-height: 5rem; }
 label { display: block; margin: .5rem 0; }
 .filters, .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .7rem; }
 .actions { display: flex; flex-wrap: wrap; gap: .25rem; }
-.tasks, .task-detail, .application { border: 1px solid #d5dce9; border-radius: .6rem; padding: 1rem; margin-top: 1rem; }
+.tasks, .task-detail, .application { border: 1px solid var(--tg-theme-hint-color, #d5dce9); border-radius: .6rem; padding: 1rem; margin-top: 1rem; }
 .tasks li { margin: .35rem 0; }
 [role="alert"] { color: #a40e26; }
 
 h1 {
   margin-bottom: 1rem;
+}
+
+@media (max-width: 600px) {
+  main {
+    margin: 0 auto;
+    padding: 1rem max(1rem, env(safe-area-inset-right))
+      max(1.5rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+  }
+  .filters, .form-grid { grid-template-columns: minmax(0, 1fr); }
+  button { max-width: 100%; }
 }

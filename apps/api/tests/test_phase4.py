@@ -3,11 +3,12 @@
 import asyncio
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
+from uuid import UUID
 
 import httpx
 from aiogram import Bot
 from aiogram.types import CallbackQuery, Chat, Message, Update, User as TelegramUser
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from taskbot_api.config import Settings
 from taskbot_api.models import Notification, NotificationAttempt, ProjectMember, Task, TaskEvent, User, UserRole, WeeklyReport, now
@@ -20,7 +21,7 @@ from taskbot_worker.delivery import (
 from taskbot_worker.scheduler import (
     add_work_minutes, schedule_deadlines, schedule_reaction_reminders, schedule_weekly_reports,
 )
-from test_tasks import TOKEN, fixture, login
+from test_tasks import TOKEN, act, fixture, headers, login, new_task
 
 
 class FakeTransport:
@@ -97,6 +98,101 @@ def test_outbox_idempotency_retry_recovery_and_private_api():
                     await login(author, 703)
                     assert len((await worker.get("/api/v1/notifications")).json()) == 1
                     assert (await author.get("/api/v1/notifications")).json() == []
+        finally:
+            await engine.dispose()
+    asyncio.run(scenario())
+
+
+def test_review_request_is_skipped_if_task_was_approved_before_delivery():
+    async def scenario():
+        engine, app, factory, users, project, _ = await fixture()
+        try:
+            async with app.router.lifespan_context(app):
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as author, \
+                           httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as worker:
+                    a, w = await login(author, 703), await login(worker, 704)
+                    task = await new_task(author, a, project, users[704])
+                    for client, csrf, action in ((worker, w, "accept"),
+                                                 (worker, w, "start"),
+                                                 (worker, w, "submit-review")):
+                        response = await act(client, csrf, task, action)
+                        assert response.status_code == 200
+                        task = response.json()
+                    assert await process_outbox(factory, at=now() + timedelta(seconds=2)) == 4
+                    approved = await act(author, a, task, "approve")
+                    assert approved.status_code == 200
+                fake = FakeTransport()
+                await deliver_notifications(factory, fake, settings(), at=now() + timedelta(seconds=3))
+                async with factory() as db:
+                    review = await db.scalar(select(Notification).where(
+                        Notification.task_id == UUID(task["id"]), Notification.kind == "REVIEW_REQUESTED"))
+                    assert review is not None and review.state == "SKIPPED"
+        finally:
+            await engine.dispose()
+    asyncio.run(scenario())
+
+
+def test_qa_review_notification_requires_current_qa_role():
+    async def scenario():
+        engine, app, factory, users, project, _ = await fixture()
+        try:
+            async with app.router.lifespan_context(app):
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as author, \
+                           httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as worker:
+                    a, w = await login(author, 703), await login(worker, 704)
+                    task = await new_task(author, a, project, users[704], users[705])
+                    for action in ("accept", "start", "submit-review"):
+                        response = await act(worker, w, task, action)
+                        assert response.status_code == 200
+                        task = response.json()
+                    assert await process_outbox(factory, at=now() + timedelta(seconds=2)) == 4
+                async with factory() as db:
+                    async with db.begin():
+                        await db.execute(delete(UserRole).where(
+                            UserRole.user_id == users[705], UserRole.code == "QA"))
+                        db.add(UserRole(user_id=users[705], code="SUBJECT_DEVELOPER"))
+                fake = FakeTransport()
+                await deliver_notifications(factory, fake, settings(), at=now() + timedelta(seconds=3))
+                async with factory() as db:
+                    row = await db.scalar(select(Notification).where(
+                        Notification.task_id == UUID(task["id"]),
+                        Notification.kind == "QA_REVIEW_REQUESTED"))
+                    assert row is not None and row.state == "SKIPPED"
+                    assert all(chat_id != 705 for chat_id, _, _ in fake.sent)
+        finally:
+            await engine.dispose()
+    asyncio.run(scenario())
+
+
+def test_reassignment_back_skips_old_assignment_notifications():
+    async def scenario():
+        engine, app, factory, users, project, _ = await fixture()
+        try:
+            async with app.router.lifespan_context(app):
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as author, \
+                           httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as pm:
+                    a, p = await login(author, 703), await login(pm, 702)
+                    task = await new_task(author, a, project, users[704])
+                    for assignee in (users[705], users[704]):
+                        changed = await pm.patch(f"/api/v1/tasks/{task['id']}",
+                                                 headers=headers(p), json={
+                                                     "expected_version": task["version"],
+                                                     "assignee_id": str(assignee)})
+                        assert changed.status_code == 200
+                        task = changed.json()
+                    assert await process_outbox(factory, at=now() + timedelta(seconds=2)) == 3
+                fake = FakeTransport()
+                await deliver_notifications(factory, fake, settings(), at=now() + timedelta(seconds=3))
+                async with factory() as db:
+                    assignments = (await db.scalars(select(Notification).where(
+                        Notification.task_id == UUID(task["id"]),
+                        Notification.kind == "ASSIGNED"))).all()
+                    assert len(assignments) == 3
+                    assert sorted(row.state for row in assignments) == ["SENT", "SKIPPED", "SKIPPED"]
+                    assert [chat_id for chat_id, _, _ in fake.sent].count(704) == 1
         finally:
             await engine.dispose()
     asyncio.run(scenario())

@@ -5,15 +5,21 @@ import TaskBoard from "./TaskBoard";
 
 type Person = { id: string; name: string; phone?: string; status: string; roles: string[]; version: number };
 type Project = { id: string; name: string; description: string };
-type TelegramIdentity = { id: number; auth_date: number; hash: string; first_name?: string; last_name?: string; username?: string; photo_url?: string };
 
 declare global {
-  interface Window { onTelegramAuth?: (identity: TelegramIdentity) => void }
+  interface Window {
+    Telegram?: { WebApp: {
+      initData: string; ready: () => void; expand: () => void;
+      BackButton: { show: () => void; hide: () => void; onClick: (callback: () => void) => void;
+        offClick: (callback: () => void) => void };
+    } };
+  }
 }
 
-const api = process.env.NEXT_PUBLIC_TASKBOT_API_URL || "http://localhost:8000";
-const botUsername = process.env.NEXT_PUBLIC_TELEGRAM_BOT_USERNAME;
-const devLoginEnabled = process.env.NEXT_PUBLIC_TASKBOT_DEV_LOGIN_ENABLED === "true";
+const devLoginEnabled = process.env.NODE_ENV !== "production" &&
+  process.env.NEXT_PUBLIC_TASKBOT_DEV_LOGIN_ENABLED === "true";
+// The guarded local dev login requires a direct loopback request; Mini App traffic uses the proxy.
+const api = devLoginEnabled ? process.env.NEXT_PUBLIC_TASKBOT_API_URL || "" : "";
 const roles = ["PM", "TEAM_LEAD", "SUBJECT_DEVELOPER", "QA"];
 
 export default function HomePage() {
@@ -21,7 +27,6 @@ export default function HomePage() {
   const [pending, setPending] = useState<Person[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [message, setMessage] = useState("Загрузка…");
-  const [ready, setReady] = useState(false);
   const [devSecret, setDevSecret] = useState("");
   const [devBusy, setDevBusy] = useState(false);
   const [projectName, setProjectName] = useState("");
@@ -29,10 +34,11 @@ export default function HomePage() {
   const [projectBusy, setProjectBusy] = useState(false);
   const [projectFeedback, setProjectFeedback] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const projectAttempt = useRef<{ payload: string; key: string } | null>(null);
+  const initialized = useRef(false);
 
-  async function load() {
+  async function load(): Promise<boolean> {
     const response = await fetch(`${api}/api/v1/users/me`, { credentials: "include" });
-    if (!response.ok) { setPerson(null); setMessage(devLoginEnabled ? "Выберите способ входа." : "Войдите через Telegram после одобрения заявки."); return; }
+    if (!response.ok) { setPerson(null); setProjects([]); setPending([]); return false; }
     const current: Person = await response.json();
     setPerson(current);
     setMessage("");
@@ -43,45 +49,60 @@ export default function HomePage() {
       const pendingResponse = await fetch(`${api}/api/v1/users/pending`, { credentials: "include" });
       if (pendingResponse.ok) setPending(await pendingResponse.json());
     }
+    return true;
   }
 
-  useEffect(() => { void load().catch(() => setMessage("API недоступен.")); }, []);
-
   useEffect(() => {
-    if (person || !botUsername) return;
-    let live = true;
-    fetch(`${api}/api/v1/auth/telegram/challenge`, { credentials: "include" })
-      .then((response) => { if (!response.ok) throw new Error(); if (live) setReady(true); })
-      .catch(() => { if (live) setMessage("Telegram Login пока не настроен на API."); });
-    return () => { live = false; };
-  }, [person]);
-
-  useEffect(() => {
-    if (!ready || person || !botUsername) return;
-    window.onTelegramAuth = async (identity) => {
+    if (initialized.current) return;
+    initialized.current = true;
+    const initialize = async () => {
+      const webApp = window.Telegram?.WebApp;
+      webApp?.ready();
+      webApp?.expand();
+      if (!webApp?.initData && !devLoginEnabled) {
+        setMessage("Откройте приложение кнопкой в Telegram-боте.");
+        return;
+      }
       try {
-        const response = await fetch(`${api}/api/v1/auth/telegram`, {
-          method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(identity),
+        const session = await fetch(`${api}/api/v1/auth/session/refresh`, {
+          method: "POST", credentials: "include",
         });
-        if (!response.ok) { setMessage("Вход отклонён: заявка не одобрена либо данные Telegram недействительны."); return; }
+        if (session.ok) {
+          const data = await session.json();
+          sessionStorage.setItem("taskbot_csrf", data.csrf_token);
+          if (!await load()) setMessage("Не удалось загрузить профиль. Откройте приложение заново.");
+          return;
+        }
+        sessionStorage.removeItem("taskbot_csrf");
+        if (session.status !== 401 && session.status !== 403) {
+          setMessage("Не удалось восстановить сессию. Попробуйте открыть приложение снова.");
+          return;
+        }
+        if (!webApp?.initData) {
+          setMessage("Для локальной разработки войдите ниже.");
+          return;
+        }
+        const response = await fetch(`${api}/api/v1/auth/webapp`, {
+          method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ init_data: webApp.initData }),
+        });
+        if (!response.ok) {
+          const detail = (await response.json().catch(() => ({}))).detail;
+          setMessage(detail === "ACCOUNT_PENDING" ? "Заявка ожидает одобрения администратора." :
+            detail === "ACCOUNT_BLOCKED" ? "Доступ заблокирован. Обратитесь к администратору." :
+            detail === "ACCOUNT_REJECTED" ? "Заявка отклонена. Обратитесь к администратору." :
+            detail === "REGISTRATION_REQUIRED" ? "Сначала отправьте /start боту и завершите регистрацию." :
+            detail === "WEBAPP_INIT_DATA_EXPIRED" || detail === "WEBAPP_INIT_DATA_REPLAYED" ?
+              "Откройте приложение заново из бота." : "Вход через Telegram не удался. Откройте приложение заново из бота.");
+          return;
+        }
         const data = await response.json();
         sessionStorage.setItem("taskbot_csrf", data.csrf_token);
-        await load();
-      } catch { setMessage("Не удалось связаться с API."); }
+        if (!await load()) setMessage("Не удалось загрузить профиль. Откройте приложение заново.");
+      } catch { setMessage("Не удалось связаться с API. Проверьте подключение и попробуйте снова."); }
     };
-    const host = document.getElementById("telegram-login");
-    if (!host) return;
-    host.replaceChildren();
-    const script = document.createElement("script");
-    script.async = true;
-    script.src = "https://telegram.org/js/telegram-widget.js?22";
-    script.setAttribute("data-telegram-login", botUsername);
-    script.setAttribute("data-size", "large");
-    script.setAttribute("data-onauth", "onTelegramAuth(user)");
-    host.appendChild(script);
-    return () => { delete window.onTelegramAuth; host.replaceChildren(); };
-  }, [ready, person]);
+    void initialize();
+  }, []);
 
   async function decide(candidate: Person, status: "ACTIVE" | "REJECTED", role: string) {
     const csrf = sessionStorage.getItem("taskbot_csrf");
@@ -167,7 +188,6 @@ export default function HomePage() {
     setPending([]);
     setProjectFeedback(null);
     projectAttempt.current = null;
-    setReady(false);
     setMessage("Вы вышли из системы.");
   }
 
@@ -176,7 +196,6 @@ export default function HomePage() {
       <h1>Taskbot</h1>
       {!person ? <>
         <p>{message}</p>
-        {botUsername ? <div id="telegram-login" aria-label="Вход через Telegram" /> : <p>Администратору нужно настроить Telegram Login и домен бота.</p>}
         {devLoginEnabled && <form onSubmit={(event) => void localLogin(event)}>
           <h2>Локальный вход для разработки</h2>
           <label>Секрет из локального TASKBOT_DEV_LOGIN_SECRET
@@ -185,7 +204,7 @@ export default function HomePage() {
           </label>
           <button type="submit" disabled={devBusy}>Войти локально</button>
         </form>}
-        <p>Для регистрации откройте бота и отправьте /start.</p>
+        <p>Для регистрации отправьте боту /start.</p>
       </> : <>
         <p>Здравствуйте, {person.name}. Роли: {person.roles.join(", ")}.</p>
         <button onClick={() => void logout()}>Выйти</button>

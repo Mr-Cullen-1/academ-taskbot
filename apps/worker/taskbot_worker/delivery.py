@@ -212,7 +212,43 @@ async def still_relevant(db: AsyncSession, notification: Notification, at: datet
             return relevant
         return relevant and "TEAM_LEAD" in await role_codes(db, recipient.id)
     if notification.kind == "ASSIGNED":
-        return task.status == "OPEN" and task.assignee_id == recipient.id
+        assignment = await latest_assignment_event(db, task.id)
+        return (task.status == "OPEN" and task.assignee_id == recipient.id and
+                assignment is not None and assignment.id == notification.source_event_id)
+    if notification.kind == "ASSIGNMENT_REMOVED":
+        assignment = await latest_assignment_event(db, task.id)
+        return (task.status == "OPEN" and task.assignee_id != recipient.id and
+                assignment is not None and assignment.id == notification.source_event_id)
+    if notification.kind in {"REVIEW_REQUESTED", "QA_REVIEW_REQUESTED"}:
+        if task.status != "REVIEW":
+            return False
+        if notification.kind == "QA_REVIEW_REQUESTED" and (
+                task.qa_review_status != "PENDING" or task.qa_reviewer_id != recipient.id or
+                "QA" not in await role_codes(db, recipient.id)):
+            return False
+        latest_review = await db.scalar(select(TaskEvent.id).where(
+            TaskEvent.task_id == task.id, TaskEvent.type == "SUBMIT_REVIEW")
+            .order_by(TaskEvent.sequence.desc()).limit(1))
+        return latest_review == notification.source_event_id
+    if notification.kind == "REWORK":
+        latest_rework = await db.scalar(select(TaskEvent.id).where(
+            TaskEvent.task_id == task.id, TaskEvent.type == "REQUEST_REWORK")
+            .order_by(TaskEvent.sequence.desc()).limit(1))
+        return (task.status == "REWORK" and task.assignee_id == recipient.id and
+                latest_rework == notification.source_event_id)
+    if notification.kind == "TASK_BLOCKED":
+        latest_block = await db.scalar(select(TaskEvent.id).where(
+            TaskEvent.task_id == task.id, TaskEvent.type == "BLOCK")
+            .order_by(TaskEvent.sequence.desc()).limit(1))
+        return task.status == "BLOCKED" and latest_block == notification.source_event_id
+    if notification.kind == "QA_ASSIGNED":
+        latest_qa_change = await db.scalar(select(TaskEvent.id).where(
+            TaskEvent.task_id == task.id, TaskEvent.type == "QA_REVIEWER_CHANGED")
+            .order_by(TaskEvent.sequence.desc()).limit(1))
+        return (task.status not in {"DONE", "CANCELLED"} and
+                task.qa_reviewer_id == recipient.id and
+                "QA" in await role_codes(db, recipient.id) and
+                latest_qa_change == notification.source_event_id)
     return True
 
 

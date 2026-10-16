@@ -391,3 +391,75 @@ def test_calendar_date_overdue_boundary_and_status_exclusions():
     for status in ("REVIEW", "REJECTED", "DONE", "CANCELLED"):
         task.status = status
         assert is_overdue(task, today=today) is False
+
+
+def test_active_task_author_cannot_lose_project_access_before_approval():
+    async def scenario():
+        engine, app, factory, users, project, _ = await fixture()
+        try:
+            async with app.router.lifespan_context(app):
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as author, \
+                           httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as admin:
+                    author_csrf = await login(author, 703)
+                    admin_csrf = await login(admin, 701)
+                    task = await new_task(author, author_csrf, project, users[704])
+                    response = await admin.put(f"/api/v1/projects/{project}/members",
+                                               headers=headers(admin_csrf),
+                                               json={"expected_version": 1, "members": [
+                                                   str(users[number]) for number in (702, 704, 705, 708)]})
+                    assert response.status_code == 409
+                    assert (await author.get(f"/api/v1/tasks/{task['id']}")).status_code == 200
+        finally:
+            await engine.dispose()
+    asyncio.run(scenario())
+
+
+def test_direct_api_enforces_project_and_task_actor_boundaries():
+    async def scenario():
+        engine, app, factory, users, project, _ = await fixture()
+        try:
+            async with factory() as db:
+                async with db.begin():
+                    db.add(UserRole(user_id=users[708], code="TEAM_LEAD"))
+            async with app.router.lifespan_context(app):
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as author, \
+                           httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as worker, \
+                           httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as qa, \
+                           httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as lead, \
+                           httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as outsider, \
+                           httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as anonymous:
+                    a, w, q, l, o = [await login(client, number) for client, number in
+                                     ((author, 703), (worker, 704), (qa, 705), (lead, 708), (outsider, 706))]
+                    task = await new_task(author, a, project, users[704], users[705])
+                    path = f"/api/v1/tasks/{task['id']}"
+                    assert (await anonymous.get(path)).status_code == 401
+                    assert (await anonymous.post(f"{path}/cancel", json={"expected_version": 1,
+                        "reason": "Forged"})).status_code == 401
+                    assert (await outsider.get(path)).status_code == 404
+                    assert (await outsider.get(f"{path}/comments")).status_code == 404
+                    assert (await outsider.get(f"{path}/events")).status_code == 404
+                    assert (await outsider.patch(path, headers=headers(o),
+                        json={"expected_version": 1, "title": "Forged"})).status_code == 404
+                    assert (await outsider.post(f"{path}/cancel", headers=headers(o),
+                        json={"expected_version": 1, "reason": "Forged"})).status_code == 404
+                    assert (await author.post("/api/v1/tasks", headers=headers(a), json={
+                        "project_id": str(project), "title": "Forged", "due_date": "2027-01-01",
+                        "created_by": str(users[705])})).status_code == 422
+                    assert (await lead.get(path)).status_code == 200
+                    assert (await lead.patch(path, headers=headers(l),
+                        json={"expected_version": 1, "title": "Forbidden"})).status_code == 403
+                    assert (await lead.post(f"{path}/cancel", headers=headers(l),
+                        json={"expected_version": 1, "reason": "Forbidden"})).status_code == 403
+                    assert (await qa.post(f"{path}/accept", headers=headers(q),
+                        json={"expected_version": 1})).status_code == 403
+                    assert (await worker.post(f"{path}/reject", headers=headers(w),
+                        json={"expected_version": 1, "reason": "  "})).status_code == 422
+                    comment = await worker.post(f"{path}/comments", headers=headers(w), json={
+                        "body": "I am working on it", "author_user_id": str(users[703])})
+                    assert comment.status_code == 201
+                    assert comment.json()["author_user_id"] == str(users[704])
+        finally:
+            await engine.dispose()
+    asyncio.run(scenario())

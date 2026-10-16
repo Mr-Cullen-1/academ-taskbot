@@ -225,6 +225,8 @@ def test_approval_rejection_roles_projects_and_block():
                 sa_project = await admin.post("/api/v1/projects", json={"name": "Admin project"},
                                               headers=mutation_headers(csrf))
                 assert sa_project.status_code == 201
+                assert (await admin.post("/api/v1/projects", json={"name": "   "},
+                                         headers=mutation_headers(csrf))).status_code == 422
 
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost:8000") as pm:
                     pm_login = await login(pm, 202)

@@ -36,3 +36,11 @@ def test_example_env_is_valid() -> None:
     assert settings.database_url is not None
     assert settings.database_url.startswith("postgresql+asyncpg://")
 
+
+def test_webapp_url_requires_public_https() -> None:
+    assert Settings(_env_file=None, webapp_url="https://mini.example.com/app").webapp_url == "https://mini.example.com/app"
+    with pytest.raises(ValidationError, match="TASKBOT_WEBAPP_URL"):
+        Settings(_env_file=None, webapp_url="http://localhost:3000")
+    with pytest.raises(ValidationError, match="TASKBOT_WEBAPP_URL"):
+        Settings(_env_file=None, webapp_url="https://user:pass@mini.example.com/app")
+

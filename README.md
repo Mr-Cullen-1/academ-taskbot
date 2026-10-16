@@ -1,10 +1,10 @@
 # Taskbot
 
-Phase 2 implements Telegram registration, fixed roles, verified web login, and project membership. Phase 3 adds tasks, their approved workflow, separate QA review, comments and history. Phase 4 adds an opt-in notification worker and weekly reports. Product rules are in [`docs/`](docs/SPECIFICATION.md).
+Taskbot has two user interfaces: a Telegram bot for registration, notifications and quick actions, and one Next.js Telegram Mini App for project and task work. FastAPI provides their shared business rules. The Phase 4 worker is opt-in. Product rules are in [`docs/`](docs/SPECIFICATION.md).
 
 ## Requirements and setup
 
-- Python 3.11+, Node.js 20.9+, PostgreSQL, and a Telegram bot token when polling or web login is used.
+- Python 3.11+, Node.js 20.9+, PostgreSQL, and a Telegram bot token for polling and Mini App login.
 - Run commands from the repository root unless a command changes directory.
 
 ```powershell
@@ -51,7 +51,7 @@ Set `TASKBOT_BOT_TOKEN`, then start polling:
 .venv\Scripts\python.exe -m taskbot_bot
 ```
 
-`--check` loads handlers without contacting Telegram. Polling requires the migrated PostgreSQL database. In a private chat, `/start` asks for the built-in contact share button, checks `contact.user_id == from_user.id`, then asks for a name and writes one `PENDING` account. The database deduplicates `update_id`; repeating registration never creates another user. No message to an administrator is sent automatically in Phase 2; the pending list is available in API and web.
+`--check` loads handlers without contacting Telegram. Polling requires the migrated PostgreSQL database. In a private chat, `/start` asks for the built-in contact share button, checks `contact.user_id == from_user.id`, then asks for a name and writes one `PENDING` account. The database deduplicates `update_id`; repeating registration never creates another user. With `TASKBOT_WEBAPP_URL` configured, an active user's `/start` reply includes an **Открыть задачи** Mini App button. Pending requests are available to Super Admin in the API and Mini App.
 
 The bot supports `/my_tasks`, `/created_tasks`, `/task TASK-1001`, `/comments TASK-1001`, `/history TASK-1001`, and `/comment TASK-1001 text`. The detail response lists available commands such as `/accept`, `/begin`, `/block`, `/resume`, `/submit`, `/rework`, `/qa_done`, `/approve`, and `/cancel`. Reasons are included after the key; exceptional acceptance requires `/admin_approve TASK-1001 CONFIRM reason`. Assignment messages have **Принять** and **Отказаться** buttons; refusal requires a text reply with the reason. These actions require an active account and project access and are deduplicated by Telegram `update_id`.
 
@@ -63,11 +63,11 @@ The bot supports `/my_tasks`, `/created_tasks`, `/task TASK-1001`, `/comments TA
 
 Replace the ID with the verified pending Telegram ID from the administrator's request. This command succeeds only for an existing `PENDING` account and only when no Super Admin exists. It writes an audit entry. Never run it for an unknown request. Assign `TEAM_LEAD` to the appropriate verified account using the normal role endpoint or the administration interface; no person's name or number is embedded in code.
 
-## Telegram web login
+## Telegram Mini App
 
-The implementation uses the [official Telegram Login Widget](https://core.telegram.org/widgets/login/). Link the web domain to the bot with BotFather `/setdomain`; set `TASKBOT_TELEGRAM_BOT_USERNAME` and the exact `TASKBOT_WEB_ORIGIN` in `.env`, and set the same bot username plus public API URL in `apps/web/.env.local`. A real browser login needs a domain Telegram accepts and HTTPS for deployment. Web and API should share a site so SameSite cookies work. Do not put the bot token in Next.js public variables.
+The existing Next.js frontend is the **single Mini App UI**, not a separate user website. Configure a public HTTPS address for it in `TASKBOT_WEBAPP_URL`, and set `TASKBOT_WEB_ORIGIN` to that address's exact origin. Set the server-only `TASKBOT_API_UPSTREAM` in `apps/web/.env.local` to the FastAPI HTTPS origin; leave `NEXT_PUBLIC_TASKBOT_API_URL` unset. Production startup requires this variable and rejects an HTTP upstream. Next.js proxies `/api/v1` on the Mini App's own origin, so its HttpOnly `Secure`, `SameSite=Lax` session cookie and CSRF requests remain same-origin. Keep the bot token only in the API/bot environment, never in a `NEXT_PUBLIC_` variable. A valid public URL must also be configured for the bot's Mini App button; optionally configure the same URL with BotFather `/setmenubutton`.
 
-The API issues a short-lived login challenge cookie, verifies the Telegram HMAC signature and `auth_date`, rejects proof replay, and creates a revocable HttpOnly session only for an `ACTIVE` user. The browser receives a CSRF token for mutations; backend roles and project membership remain authoritative. The server accepts no client-selected role, phone, or unverified Telegram ID. `TASKBOT_SESSION_COOKIE_SECURE=true` is the default; `false` is allowed only with a localhost origin for local HTTP development. The login proof lifetime defaults to 300 seconds and the session to 24 hours. Production entry points should enforce TLS and request rate limits.
+The frontend loads Telegram's official Web App script and sends the **raw** `Telegram.WebApp.initData` to `POST /api/v1/auth/webapp`. FastAPI verifies the Telegram HMAC, `auth_date` (default maximum age 300 seconds), input shape and one-time proof use, then finds the existing user by verified Telegram ID. Only `ACTIVE` users receive the existing revocable server session and a CSRF token. On reopening, `POST /api/v1/auth/session/refresh` restores a CSRF token only from a valid, active cookie session and the exact configured Origin; otherwise a fresh Telegram proof is required. `PENDING`, `BLOCKED`, rejected and unregistered users cannot access tasks. Every later API action retains backend role and project checks. The old Login Widget API remains for compatibility, but the Mini App UI does not load that widget. Direct browser access without Telegram `initData` has no production login UI. Deployment should enforce HTTPS and rate limits for login requests. See the [Telegram Mini Apps validation guide](https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app).
 
 ### Local development login without a Telegram domain
 
@@ -89,11 +89,13 @@ TASKBOT_SESSION_COOKIE_SECURE=false
 TASKBOT_NOTIFICATION_DELIVERY_ENABLED=false
 ```
 
-In `apps/web/.env.local`, set `NEXT_PUBLIC_TASKBOT_API_URL=http://localhost:8000` and `NEXT_PUBLIC_TASKBOT_DEV_LOGIN_ENABLED=true`. Restart both API and web development servers after changing these files. Run the API bound to `127.0.0.1`, open **http://localhost:3000**, and paste the same secret into “Локальный вход для разработки”. The web page does not save the secret; the API checks it, confirms that configured Telegram ID belongs to an existing active Super Admin, then issues the usual cookie session and CSRF token. No new user or role is created. Use the normal **Выйти** button to revoke the session.
+In `apps/web/.env.local`, set `NEXT_PUBLIC_TASKBOT_API_URL=http://localhost:8000` and `NEXT_PUBLIC_TASKBOT_DEV_LOGIN_ENABLED=true` for this **local-only** path. Restart both servers, bind the API to `127.0.0.1`, open **http://localhost:3000**, and enter the local secret. This direct loopback API path preserves the dev route's loopback/proxy checks; with dev login disabled, Mini App traffic uses the same-origin rewrite. The API confirms the configured ID belongs to an existing active Super Admin and issues the usual cookie session and CSRF token. No user or role is created.
 
-The route accepts only loopback clients, local Host and Origin, and no proxy forwarding headers. It is excluded entirely when `TASKBOT_DEV_LOGIN_ENABLED=false` (the default). With `TASKBOT_APP_ENV=production`, attempting to enable it fails application configuration validation; production must leave it disabled and use Telegram Login. To verify locally, restart the API with dev login disabled and confirm `POST /api/v1/auth/dev` returns `404`; the automated tests also check both production gates. Do not copy the local secret into Git, Next.js public variables, or a deployed environment.
+The route accepts only loopback clients, local Host and Origin, and no proxy forwarding headers. It is excluded entirely when `TASKBOT_DEV_LOGIN_ENABLED=false` (the default). With `TASKBOT_APP_ENV=production`, attempting to enable it fails configuration validation. To verify locally, restart the API with dev login disabled and confirm `POST /api/v1/auth/dev` returns `404`. Do not copy the local secret into Git, Next.js public variables, or a deployed environment.
 
-### Start the web panel
+### Start the Mini App frontend locally
+
+With development login disabled, Next.js proxies `/api/v1/*` to `http://127.0.0.1:8000` by default. You can set `TASKBOT_API_UPSTREAM` in `apps/web/.env.local` to choose another local API origin. In production this variable is required and must be an HTTPS API origin. Keep it server-side; it is not a `NEXT_PUBLIC_` setting. Open the page in an ordinary browser to see the unauthenticated prompt; project and task data remain hidden without a valid session.
 
 ```powershell
 Set-Location apps/web
@@ -101,7 +103,7 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-Open the configured web origin. The page supports Telegram login, displays accessible projects and tasks, filters tasks, creates and edits them, shows permitted actions, comments and history, and gives Super Admin a pending request list and a small project creation form. A newly created project appears immediately in the project list and task creation selector. Other administration operations are available through the API. On PowerShell systems that block `npm.ps1`, use `npm.cmd`.
+The Mini App displays accessible projects and tasks, filters, permitted actions, comments and history; Super Admin also sees pending requests and a project creation form. For local browser development without Telegram, use the guarded dev login above. To test **real** Mini App login, use an HTTPS URL reachable by Telegram, configure the same URL in `TASKBOT_WEBAPP_URL`, and open the button in the bot from an approved account. `localhost` cannot serve as that public Telegram URL. On PowerShell systems that block `npm.ps1`, use `npm.cmd`.
 
 ## Worker and tests
 
@@ -120,4 +122,4 @@ Weekly reports cover the previous local calendar week and are generated on Monda
 .venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
 ```
 
-Phase 2–4 tests use isolated in-memory SQLite, fake delivery transport and generated Telegram signatures; bot handler tests mock replies and never call Telegram. The migration tests apply revisions to disposable SQLite, while Alembic offline SQL checks PostgreSQL DDL generation. Run `alembic upgrade head` against a disposable PostgreSQL database before production use. `npm.cmd run build` checks the web build. A real Telegram Login flow can only be tested after BotFather domain and bot token setup.
+Backend tests use isolated in-memory SQLite, fake delivery transport and generated Telegram signatures; bot handler tests mock replies and never call Telegram. Migration tests use disposable SQLite, while Alembic offline SQL checks PostgreSQL DDL generation. Run `alembic upgrade head` against a disposable PostgreSQL database before production use. `npm.cmd run build` checks the Mini App build. A real Telegram Mini App flow requires the configured bot and a reachable HTTPS URL.

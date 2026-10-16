@@ -5,7 +5,8 @@ import asyncio
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import CommandStart
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+from aiogram.types import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
+                           Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, WebAppInfo)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from taskbot_api.config import get_settings
@@ -20,7 +21,8 @@ def contact_keyboard() -> ReplyKeyboardMarkup:
 
 
 async def handle_registration(message: Message, event_update: Update,
-                              registration_factory: async_sessionmaker[AsyncSession], kind: str) -> None:
+                              registration_factory: async_sessionmaker[AsyncSession], kind: str,
+                              webapp_url: str | None = None) -> None:
     if not message.from_user or message.chat.type != "private":
         return
     contact = message.contact
@@ -39,28 +41,37 @@ async def handle_registration(message: Message, event_update: Update,
         "INVALID_CONTACT": ("Нужен ваш собственный контакт через кнопку Telegram.", contact_keyboard()),
         "INVALID_NAME": ("Введите имя длиной от 2 до 160 символов.", ReplyKeyboardRemove()),
         "ACCOUNT_PENDING": ("Заявка отправлена. Дождитесь одобрения администратора.", ReplyKeyboardRemove()),
-        "ACCOUNT_ACTIVE": ("Ваш аккаунт активен. Войдите в веб-панель через Telegram.", ReplyKeyboardRemove()),
+        "ACCOUNT_ACTIVE": ("Ваш аккаунт активен. Откройте задачи внутри Telegram.", ReplyKeyboardRemove()),
         "ACCOUNT_REJECTED": ("Заявка отклонена. Обратитесь к администратору.", ReplyKeyboardRemove()),
         "ACCOUNT_BLOCKED": ("Доступ заблокирован. Обратитесь к администратору.", ReplyKeyboardRemove()),
         "START_REQUIRED": ("Сначала отправьте /start.", ReplyKeyboardRemove()),
     }
     text, markup = replies.get(result.code, ("Отправьте /start, чтобы начать регистрацию.", ReplyKeyboardRemove()))
+    if result.code == "ACCOUNT_ACTIVE" and webapp_url:
+        markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Открыть задачи", web_app=WebAppInfo(url=webapp_url))
+        ]])
+    elif result.code == "ACCOUNT_ACTIVE":
+        text = "Ваш аккаунт активен. Ссылка Mini App ещё не настроена администратором."
     await message.answer(text, reply_markup=markup)
 
 
 async def start(message: Message, event_update: Update,
-                registration_factory: async_sessionmaker[AsyncSession]) -> None:
-    await handle_registration(message, event_update, registration_factory, "START")
+                registration_factory: async_sessionmaker[AsyncSession],
+                webapp_url: str | None = None) -> None:
+    await handle_registration(message, event_update, registration_factory, "START", webapp_url)
 
 
 async def contact(message: Message, event_update: Update,
-                  registration_factory: async_sessionmaker[AsyncSession]) -> None:
-    await handle_registration(message, event_update, registration_factory, "CONTACT")
+                  registration_factory: async_sessionmaker[AsyncSession],
+                  webapp_url: str | None = None) -> None:
+    await handle_registration(message, event_update, registration_factory, "CONTACT", webapp_url)
 
 
 async def name(message: Message, event_update: Update,
-               registration_factory: async_sessionmaker[AsyncSession]) -> None:
-    await handle_registration(message, event_update, registration_factory, "NAME")
+               registration_factory: async_sessionmaker[AsyncSession],
+               webapp_url: str | None = None) -> None:
+    await handle_registration(message, event_update, registration_factory, "NAME", webapp_url)
 
 
 def build_dispatcher() -> Dispatcher:
@@ -87,6 +98,7 @@ async def run_polling() -> None:
     try:
         async with Bot(token=token.get_secret_value()) as bot:
             await build_dispatcher().start_polling(bot, registration_factory=session_factory(engine),
+                                                   webapp_url=settings.webapp_url,
                                                    allowed_updates=["message", "callback_query"])
     finally:
         await engine.dispose()

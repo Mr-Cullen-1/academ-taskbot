@@ -1,11 +1,11 @@
 # API — контракт Phase 0
 
-Все пути ниже имеют префикс /api/v1. Спецификация определяет группы операций; этот документ задаёт логические контракты без реализации. Бот и веб-панель используют одну бизнес-логику backend. UUID передаются строками. Время — RFC 3339 с UTC offset; интерфейс переводит его в Asia/Tashkent. Статусы и переходы — [BUSINESS_RULES.md](BUSINESS_RULES.md), права — [PERMISSIONS.md](PERMISSIONS.md).
+Все пути ниже имеют префикс /api/v1. Бот и Telegram Mini App используют одну бизнес-логику backend; Next.js служит единственным интерфейсом Mini App. UUID передаются строками. Время — RFC 3339 с UTC offset; интерфейс переводит его в Asia/Tashkent. Статусы и переходы — [BUSINESS_RULES.md](BUSINESS_RULES.md), права — [PERMISSIONS.md](PERMISSIONS.md).
 
 ## Общие правила
 
 - Каждый endpoint, кроме входа и Telegram webhook, требует действующую серверную сессию пользователя Active. Роль и проектный доступ проверяются на каждом запросе; списки фильтруются до пагинации. Недоступный объект возвращается как NOT_FOUND, если иначе раскрывалось бы его существование.
-- Обычные изменяющие операции API, включая logout, используют Idempotency-Key, ограниченный актором и операцией; повтор logout должен быть безопасным. Срок хранения ключа задаётся технической политикой до реализации. Повтор с тем же телом возвращает сохранённый результат, с другим телом — 409 CONFLICT. Одновременные повторы схлопываются атомарно. POST /auth/telegram защищается одноразовостью кода/challenge или replay-контролем подписанного payload выбранного протокола, проверкой срока и привязки к ожидаемому клиенту; Idempotency-Key не заменяет эту защиту. Telegram webhook защищается проверкой источника и атомарной дедупликацией update_id до побочного эффекта, а не клиентским Idempotency-Key.
+- Обычные изменяющие операции API используют Idempotency-Key, ограниченный актором и операцией; повтор с другим телом даёт 409 CONFLICT. Auth endpoints защищаются отдельно: POST /auth/webapp проверяет подписанный raw initData, auth_date, Origin и одноразовость proof; существующий POST /auth/telegram проверяет challenge и replay; POST /auth/session/refresh требует действующую cookie-сессию Active пользователя и точный Origin. Idempotency-Key не заменяет эти проверки. Telegram webhook защищается проверкой источника и атомарной дедупликацией update_id до побочного эффекта.
 - Изменения существующего ресурса используют expected_version в теле либо If-Match; один механизм должен быть выбран перед реализацией. В таблицах ниже указан expected_version как рекомендуемый вариант. Для решения deadline_requests это версия запроса; связанная задача также блокируется и проверяется в транзакции. Несовпадение — 409 CONFLICT без новых task_events/outbox.
 - Страницы списков: limit и cursor, стабильная сортировка (created_at и UUID как tie-breaker), серверный cap. Рекомендуемые 25/100 требуют проверки нагрузки; это техническая рекомендация. Фильтры перечислены ниже, произвольные SQL-поля не допускаются.
 - Успех: GET 200, создание 201, действия 200 с обновлённым ресурсом или 204 для удаления/прочтения. Полный формат ответа: data и, для списков, page.next_cursor. Поля, недоступные роли, исключаются.
@@ -15,7 +15,9 @@
 
 | Операция | Минимальный запрос → ответ | Доступ / особое правило |
 | --- | --- | --- |
-| POST /auth/telegram | Проверяемое proof выбранного Telegram Login → app session и user summary | Публичный, rate limit; вход только для Active. Нельзя принимать произвольный Telegram ID/phone. |
+| POST /auth/webapp | {init_data: raw Telegram.WebApp.initData} → HttpOnly app session, CSRF token и user summary | Основной вход Mini App; сервер проверяет HMAC по bot token, auth_date, Origin, одноразовость proof; только существующий Active user. Pending/Blocked/Rejected не получают сессию. |
+| POST /auth/telegram | Legacy Login Widget proof → app session и user summary | Оставлен для совместимости API; Mini App его не вызывает. Проверка challenge, HMAC, срока и replay сохраняется. |
+| POST /auth/session/refresh | Cookie действующей сессии и точный Origin → новый CSRF token | Для повторного открытия Mini App; требует Active пользователя, не продлевает срок сессии и не создаёт новую. Без cookie или с отозванной/истёкшей сессией вход выполняется по новому проверенному initData. |
 | POST /auth/dev | {secret} → обычная cookie-сессия и CSRF token | Только явно включённый local development: loopback Host/client, точный локальный Origin, без proxy headers; ID берётся из конфигурации и проверяется как существующий Active SUPER_ADMIN. Маршрут отсутствует при выключенном режиме и не может быть включён с APP_ENV=production. Не является способом входа в развёрнутой системе. |
 | POST /auth/logout | Пустой запрос → 204 | Владелец сессии; отзывает текущую сессию. |
 | GET /users/me | — → профиль, account_status, эффективные роли/проекты | Авторизованный пользователь. |
@@ -23,7 +25,7 @@
 | PATCH /users/{id}/status | {status, reason?, expected_version} → user | Единственный Super Admin; подтверждение Pending→Active, отклонение, блокировка. При Blocked отозвать сессии и сохранить инвариант одного Super Admin. Иные переходы — OQ-03. |
 | PUT /users/{id}/roles | {roles:[code],expected_version} → роли | Только пять фиксированных кодов SUPER_ADMIN, PM, TEAM_LEAD, SUBJECT_DEVELOPER, QA. Назначает Super Admin; нельзя создать второго действующего SUPER_ADMIN или передать произвольные права. Полная замена набора, атомарно, с audit_log. |
 
-Регистрация через Telegram начинается после /start: пользователь передаёт контакт штатной кнопкой и вводит имя. После проверки, что contact.user_id совпадает с from.id в проверенном Telegram update, сохраняется заявка Pending без рабочей сессии. Только Super Admin переводит её в Active. Для webhook нужен отдельный POST /integrations/telegram/webhook: Telegram secret header, TLS, dedupe по update_id, ограниченный тип updates, без пользовательской cookie-сессии. В Phase 0 endpoint только описан; webhook не подключён. Дополнительный login challenge/start endpoint зависит от выбранной схемы (OQ-01).
+Регистрация через Telegram начинается после /start: пользователь передаёт контакт штатной кнопкой и вводит имя. После проверки, что contact.user_id совпадает с from.id в проверенном Telegram update, сохраняется заявка Pending без рабочей сессии. Только Super Admin переводит её в Active. Бот сейчас использует polling и дедупликацию update_id; webhook с secret header и TLS остаётся возможным будущим способом приёма updates. Вход Mini App не подтверждает номер телефона.
 
 ## Проекты и спринты
 
@@ -112,7 +114,7 @@ QA-проверка использует те же expected_version, Idempotency
 
 ## Защита, повтор и транзакции
 
-Telegram Login: выбранное доказательство проверяется сервером по официальному протоколу. Для современного [OIDC](https://core.telegram.org/bots/telegram-login) нужны state, PKCE, проверка подписи ID token, issuer, audience, срока и nonce при использовании. Для [legacy widget](https://core.telegram.org/widgets/login) — HMAC и auth_date. Для [Mini App](https://core.telegram.org/bots/webapps) — серверная проверка raw initData, а не initDataUnsafe. Это разные схемы; выбор OQ-01. Регистрация контакта через бот также требует проверки Telegram webhook; телефон из веб-клиента не подтверждает владение Telegram аккаунтом.
+Для [Mini App](https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app) сервер проверяет raw initData: отсортированную строку полей, HMAC-SHA-256 с ключом HMAC-SHA-256(bot token, key `WebAppData`), auth_date, структуру user.id, Origin и replay. initDataUnsafe не используется для аутентификации. После обмена действуют существующие cookie-сессия, CSRF и backend-проверки ролей и проектного доступа. Для cookie-запросов Mini App и API должны быть на одном origin через проксирование /api/v1; в production нужны HTTPS и Secure/SameSite=Lax. Legacy Login Widget остаётся только для совместимости API. Контакт для регистрации проверяется отдельно в Telegram update бота.
 
 Cookie-сессия, если выбрана: HttpOnly, Secure, SameSite, CSRF token, проверка Origin, отзыв при Blocked; bearer-модель требует безопасного хранения и ротации. Ни один токен или raw auth payload не пишется в логи. Login и мутации ограничиваются rate limit. Файлы проверяются по размеру и типу; объекты приватны. Секреты только в окружении.
 

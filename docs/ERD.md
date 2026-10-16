@@ -20,7 +20,7 @@
 | users | id, telegram_user_id UNIQUE, phone, name, account_status, version, created_at, updated_at, archived_at? | Pending — заявка без рабочего доступа; Active после подтверждения Super Admin; также Rejected, Blocked. Телефон не является ключом веб-входа. |
 | roles | id, code UNIQUE | Ровно пять фиксированных кодов: SUPER_ADMIN, PM, TEAM_LEAD, SUBJECT_DEVELOPER, QA. Отдельного Observer или индивидуального permission code нет. |
 | user_roles | id, user_id, role_id, granted_by, granted_at, revoked_at? | Несколько фиксированных ролей у пользователя. Роль не привязана к конкретному проекту: проектный доступ задаёт project_members. Ровно одно действующее назначение SUPER_ADMIN на систему; роль TEAM_LEAD назначается подтверждённому аккаунту Зарины Равшановны. |
-| sessions | id, user_id, issued_at, expires_at, revoked_at?, credential_digest | Отзываются при Blocked. Форма credential зависит от OQ-01. |
+| sessions | id, user_id, issued_at, expires_at, revoked_at?, credential_digest | Существующие серверные сессии используются Mini App после проверки raw initData; отзываются при Blocked. Новая таблица для входа Mini App не требуется. |
 | projects | id, name, description, owner_user_id, status, version, created_at, updated_at, archived_at? | Одна компания, без tenant_id. Создатель становится участником проекта; назначенный владелец — Active участник проекта. |
 | project_members | id, project_id, user_id, joined_at, left_at? | Доступ к проекту только для Active пользователя; одна текущая запись на пару. PM без членства не видит чужой проект. |
 | project_teams | id, project_id, name, archived_at? | Команды внутри проекта. |
@@ -42,7 +42,7 @@
 | audit_logs | id, actor_user_id?, action, target_type, target_id?, source_event_id?, original_author_user_id?, author_unavailable_confirmed?, reason?, outcome, occurred_at, request_id, metadata | Операции доступа и администрации; ADMIN_OVERRIDE связан с task_event, хранит фактического актора, исходного автора, явное подтверждение, причину и время; без секретов. |
 | external_links | id, provider, external_id, target_type, target_id, created_at | UNIQUE(provider, external_id), задел для будущей интеграции Notion. |
 | idempotency_keys | id, actor_user_id, operation, key, request_hash, response_status, response_ref?, expires_at, created_at | UNIQUE(actor_user_id, operation, key); атомарное подавление повторных записей. |
-| telegram_updates | id, update_id UNIQUE, received_at, processed_at?, state | Рекомендовано для идемпотентности webhook бота; способ приёма Telegram обновлений уточнить OQ-01. |
+| telegram_updates | id, update_id UNIQUE, received_at, processed_at?, state | Дедупликация updates бота при текущем polling; для будущего webhook нужна также проверка источника. |
 
 ## Ограничения и индексы
 

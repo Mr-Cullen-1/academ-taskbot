@@ -8,7 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,8 +18,9 @@ from taskbot_api.models import (
     Task, User, UserRole, WebSession, now, utc,
 )
 from taskbot_api.security import (
-    CHALLENGE_COOKIE, COOKIE_NAME, CurrentUser, Db, TelegramProof, digest,
+    AuthenticatedUser, CHALLENGE_COOKIE, COOKIE_NAME, CurrentUser, Db, TelegramProof, digest,
     new_session, new_token, require_super_admin, role_codes, verify_telegram_proof,
+    verify_webapp_init_data,
 )
 from datetime import timedelta
 
@@ -32,6 +33,11 @@ NON_ADMIN_ROLES = {"PM", "TEAM_LEAD", "SUBJECT_DEVELOPER", "QA"}
 class DevLoginProof(BaseModel):
     model_config = ConfigDict(extra="forbid")
     secret: SecretStr
+
+
+class WebAppLogin(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    init_data: str = Field(min_length=1, max_length=8192)
 
 
 def local_dev_request(request: Request, origin: str) -> bool:
@@ -154,6 +160,46 @@ async def telegram_login(proof: TelegramProof, request: Request, db: Db) -> Resp
                         samesite="lax", max_age=settings.session_hours * 3600, path="/")
     response.delete_cookie(CHALLENGE_COOKIE, path="/api/v1/auth")
     return response
+
+
+@router.post("/auth/webapp")
+async def webapp_login(proof: WebAppLogin, request: Request, db: Db) -> Response:
+    settings = request.app.state.settings
+    if not settings.web_origin or request.headers.get("Origin") != settings.web_origin:
+        raise HTTPException(403, "ORIGIN_INVALID")
+    if not settings.bot_token:
+        raise HTTPException(503, "WEBAPP_LOGIN_NOT_CONFIGURED")
+    telegram_id, proof_hash = verify_webapp_init_data(
+        proof.init_data, settings.bot_token.get_secret_value(), settings.login_max_age_seconds)
+    user = await db.scalar(select(User).where(User.telegram_user_id == telegram_id))
+    if user is None:
+        raise HTTPException(403, "REGISTRATION_REQUIRED")
+    if user.status != "ACTIVE":
+        raise HTTPException(403, f"ACCOUNT_{user.status}")
+    session, token, csrf = new_session(user, settings.session_hours)
+    try:
+        db.add(LoginProof(digest=digest(f"webapp:{proof_hash}")))
+        db.add(session)
+        audit(db, user, "auth.webapp_login", "user", str(user.id))
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "WEBAPP_INIT_DATA_REPLAYED") from None
+    response = JSONResponse({"user": user_data(user, await role_codes(db, user.id)), "csrf_token": csrf})
+    response.set_cookie(COOKIE_NAME, token, httponly=True, secure=settings.session_cookie_secure,
+                        samesite="lax", max_age=settings.session_hours * 3600, path="/")
+    return response
+
+
+@router.post("/auth/session/refresh")
+async def refresh_session(request: Request, db: Db, user: AuthenticatedUser) -> Response:
+    settings = request.app.state.settings
+    if not settings.web_origin or request.headers.get("Origin") != settings.web_origin:
+        raise HTTPException(403, "ORIGIN_INVALID")
+    csrf = new_token()
+    request.state.web_session.csrf_digest = digest(csrf)
+    await db.commit()
+    return JSONResponse({"csrf_token": csrf}, headers={"Cache-Control": "no-store"})
 
 
 @dev_router.post("/auth/dev")
@@ -305,6 +351,13 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=10000)
 
+    @field_validator("name")
+    @classmethod
+    def nonempty_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("project name cannot be blank")
+        return value
+
 
 @router.post("/projects")
 async def create_project(body: ProjectCreate, request: Request,
@@ -383,7 +436,8 @@ async def change_members(project_id: UUID, body: MembersChange, request: Request
             dependent = await db.scalar(select(Task.id).where(
                 Task.project_id == project_id,
                 Task.status.not_in(("DONE", "CANCELLED")),
-                (Task.assignee_id.in_(removed) | Task.qa_reviewer_id.in_(removed)),
+                (Task.assignee_id.in_(removed) | Task.qa_reviewer_id.in_(removed) |
+                 Task.created_by.in_(removed)),
             ).limit(1))
             if dependent is not None:
                 raise HTTPException(409, "MEMBER_HAS_ACTIVE_TASK")

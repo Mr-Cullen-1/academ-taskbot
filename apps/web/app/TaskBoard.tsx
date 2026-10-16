@@ -55,10 +55,17 @@ export default function TaskBoard({ api, person, projects }: { api: string; pers
   const [note, setNote] = useState("");
   const [comment, setComment] = useState("");
   const [error, setError] = useState("");
+  const [tasksLoading, setTasksLoading] = useState(true);
+  const [detailLoading, setDetailLoading] = useState(false);
   const nameFor = (id: string) => id === person.id ? person.name : members.find((p) => p.id === id)?.name || id;
 
   async function request(path: string, init?: RequestInit) {
-    const response = await fetch(`${api}/api/v1${path}`, { credentials: "include", ...init });
+    let response: Response;
+    try {
+      response = await fetch(`${api}/api/v1${path}`, { credentials: "include", ...init });
+    } catch {
+      throw new Error("Не удалось связаться с сервером. Проверьте подключение и попробуйте снова.");
+    }
     if (!response.ok) {
       let detail = String(response.status);
       try { detail = (await response.json()).detail || detail; } catch { /* HTTP status is enough */ }
@@ -75,23 +82,36 @@ export default function TaskBoard({ api, person, projects }: { api: string; pers
     }, body: JSON.stringify(body) });
   }
   async function loadTasks() {
+    setTasksLoading(true);
     const params = new URLSearchParams();
     if (projectFilter) params.set("project_id", projectFilter);
     if (statusFilter) params.set("status", statusFilter);
     if (priorityFilter) params.set("priority", priorityFilter);
     if (assigneeFilter) params.set("assignee_id", assigneeFilter);
-    setTasks(await request(`/tasks?${params.toString()}`));
+    try { setTasks(await request(`/tasks?${params.toString()}`)); }
+    finally { setTasksLoading(false); }
   }
   async function selectTask(id: string) {
-    const [task, history, qaHistory, discussion] = await Promise.all([
+    setDetailLoading(true);
+    try {
+      const [task, history, qaHistory, discussion] = await Promise.all([
       request(`/tasks/${id}`), request(`/tasks/${id}/events`),
       request(`/tasks/${id}/qa-reviews`), request(`/tasks/${id}/comments`),
-    ]);
-    setSelected(task); setEvents(history); setQaReviews(qaHistory); setComments(discussion);
-    setTitle(task.title); setDescription(task.description);
-    setAssignee(task.assignee_id || ""); setReviewer(task.qa_reviewer_id || "");
-    setPriority(task.priority); setType(task.type);
+      ]);
+      setSelected(task); setEvents(history); setQaReviews(qaHistory); setComments(discussion);
+      setTitle(task.title); setDescription(task.description);
+      setAssignee(task.assignee_id || ""); setReviewer(task.qa_reviewer_id || "");
+      setPriority(task.priority); setType(task.type);
+    } finally { setDetailLoading(false); }
   }
+  useEffect(() => {
+    const back = window.Telegram?.WebApp.BackButton;
+    if (!back || !selected) { back?.hide(); return; }
+    const close = () => setSelected(null);
+    back.show();
+    back.onClick(close);
+    return () => { back.offClick(close); back.hide(); };
+  }, [selected]);
   useEffect(() => { if (!createProject && projects.length) setCreateProject(projects[0].id); }, [projects, createProject]);
   useEffect(() => { void loadTasks().catch((e) => setError(e.message)); }, [projectFilter, statusFilter, priorityFilter, assigneeFilter]);
   useEffect(() => {
@@ -181,10 +201,11 @@ export default function TaskBoard({ api, person, projects }: { api: string; pers
         <option value="">Любой</option>{filterMembers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
       </select></label>
     </div>
+    {tasksLoading && <p role="status">Загрузка задач…</p>}
     <ul>{tasks.map((task) => <li key={task.id}>
       <button onClick={() => void selectTask(task.id)}>{task.task_key} · {task.title} · {task.status}{task.overdue && " · просрочена"}</button>
     </li>)}</ul>
-    {!tasks.length && <p>Задач по выбранным фильтрам нет.</p>}
+    {!tasksLoading && !tasks.length && <p>Задач по выбранным фильтрам нет.</p>}
 
     <h3>Создать задачу</h3>
     <div className="form-grid">
@@ -205,7 +226,9 @@ export default function TaskBoard({ api, person, projects }: { api: string; pers
       <button disabled={!createProject || !createTitle.trim() || !createDue} onClick={() => void createTask()}>Создать</button>
     </div>
 
+    {detailLoading && <p role="status">Загрузка задачи…</p>}
     {selected && <section className="task-detail">
+      <button onClick={() => setSelected(null)}>Назад к списку</button>
       <h3>{selected.task_key}: {selected.title}</h3>
       <p>{selected.description}</p>
       <p>Статус: {selected.status}; QA: {selected.qa_review_passed ? "пройдена" : selected.qa_review_status === "DONE" ? "ожидает повторной проверки" : selected.qa_review_status || "не назначен"}; приоритет: {selected.priority}</p>

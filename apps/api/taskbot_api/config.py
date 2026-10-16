@@ -1,6 +1,7 @@
 from functools import lru_cache
 from datetime import time
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,6 +22,7 @@ class Settings(BaseSettings):
     database_connect_timeout_seconds: float = 3
     bot_token: SecretStr | None = None
     telegram_bot_username: str | None = None
+    webapp_url: str | None = None
     web_origin: str | None = None
     session_cookie_secure: bool = True
     session_hours: int = 24
@@ -43,6 +45,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_web_security(self):
+        if self.webapp_url:
+            url = urlsplit(self.webapp_url)
+            if (url.scheme != "https" or not url.hostname or
+                    url.hostname in {"localhost", "127.0.0.1", "::1"} or
+                    url.username or url.password or
+                    url.fragment):
+                raise ValueError("TASKBOT_WEBAPP_URL must be a public HTTPS URL without credentials or fragment")
         if self.dev_login_enabled:
             if (self.app_env != "development" or
                     self.web_origin not in {"http://localhost:3000", "http://127.0.0.1:3000"} or
