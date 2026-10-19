@@ -18,7 +18,7 @@ Set a real local `TASKBOT_DATABASE_URL` in `.env`; use `postgresql+asyncpg://use
 
 ## Database and API
 
-Apply the migrations. Revision `0001_phase2_access` creates identity and project access tables; `0002_phase3_tasks` creates task, comment, event and task-key sequence tables; `0003_phase4_notifications` adds notifications, delivery attempts and weekly report snapshots.
+Apply the migrations. Revision `0001_phase2_access` creates identity and project access tables; `0002_phase3_tasks` creates task, comment, event and task-key sequence tables; `0003_phase4_notifications` adds notifications, delivery attempts and weekly report snapshots; `0004_profile_avatar` adds private, size-limited profile images. Apply the new revision before opening the updated profile. The migration is not run automatically by starting the API.
 
 ```powershell
 .venv\Scripts\python.exe -m alembic upgrade head
@@ -28,7 +28,7 @@ Apply the migrations. Revision `0001_phase2_access` creates identity and project
 - `GET /api/v1/health` checks the process; `GET /api/v1/health/ready` checks the database.
 - `GET /docs` exposes the FastAPI endpoint schema.
 - Authenticated mutations require `X-CSRF-Token`; ordinary Phase 2 mutations also require an `Idempotency-Key` of 8–120 characters. Reusing a key with a different body returns 409.
-- `GET /api/v1/users/me`, `GET /api/v1/users`, `GET /api/v1/users/pending`, `PATCH /api/v1/users/{id}/status`, and `PUT /api/v1/users/{id}/roles` cover profile and administration. User list, decisions and role changes require Super Admin.
+- `GET/PATCH /api/v1/users/me` read and change only the current user's display name. `GET/PUT/DELETE /api/v1/users/me/avatar` provide private avatar viewing, replacement and removal. Avatar writes require the normal session, CSRF and idempotency key; the API validates PNG/JPEG/WebP up to 512 KiB, decodes and stores a resized JPEG. `GET /api/v1/users`, `GET /api/v1/users/pending`, `PATCH /api/v1/users/{id}/status`, and `PUT /api/v1/users/{id}/roles` cover administration. User list, decisions and role changes require Super Admin.
 - `GET/POST /api/v1/projects`, `GET /api/v1/projects/{id}`, `GET/PUT /api/v1/projects/{id}/members` provide minimal project access. Super Admin and PM may create; a PM sees only member projects. Only Super Admin changes membership pending a decision on OQ-02. The project owner is its creator and must remain a member.
 - Approval uses `PATCH /users/{id}/status` with `{"status":"ACTIVE","roles":["PM"],"expected_version":1}`. Rejection uses `REJECTED`. Blocking uses `BLOCKED`; unblocking uses `ACTIVE` without `roles`. A blocked user's sessions are revoked, and audit history is retained. Rejected applicants cannot reapply until the owner settles OQ-03.
 - The five accepted role codes are `SUPER_ADMIN`, `PM`, `TEAM_LEAD`, `SUBJECT_DEVELOPER`, `QA`; the public role endpoint cannot grant `SUPER_ADMIN` or create custom roles.
@@ -41,6 +41,7 @@ Apply the migrations. Revision `0001_phase2_access` creates identity and project
 - `POST/GET /api/v1/tasks/{id}/comments`, `GET /api/v1/tasks/{id}/events`, and `GET /api/v1/tasks/{id}/qa-reviews` expose comments and immutable history to authorized project members. A task change, its event and a generic outbox intent commit together; exceptional acceptance also writes an audit entry in the same transaction. The Phase 4 worker dispatches these intents when run explicitly.
 - Status cannot be changed through PATCH. `QA DONE` is recorded in `qa_review_status`, while the task remains `REVIEW` until author or exceptional Super Admin acceptance. `created_by` is immutable. `OVERDUE` is never a task status.
 - The due field is a required calendar date (`due_date` on create, `original_due_date` and `current_due_date` on read). `overdue` becomes true from 00:00 the following day in Asia/Tashkent for `OPEN`, `ACCEPTED`, `IN_PROGRESS`, `BLOCKED` and `REWORK`; `REVIEW`, `REJECTED`, `DONE` and `CANCELLED` are excluded. Time zone data comes from the Python `tzdata` dependency on Windows. Direct due-date edits and deadline extensions are reserved for later decisions. Reassignment currently works only while a task is `OPEN`; the exact post-rejection reassignment transition remains open in OQ-04.
+- Task reads also include `due_cutoff_at` in UTC. The Mini App uses this server-calculated instant for its urgent warning and deadline charts; no time of day is invented for the stored calendar date.
 
 ## Telegram bot and first administrator
 
@@ -82,7 +83,7 @@ Put the output in the ignored root `.env` file, alongside the working database U
 ```dotenv
 TASKBOT_APP_ENV=development
 TASKBOT_DEV_LOGIN_ENABLED=true
-TASKBOT_DEV_LOGIN_TELEGRAM_ID=6362882059
+TASKBOT_DEV_LOGIN_TELEGRAM_ID=<YOUR_TELEGRAM_ID>
 TASKBOT_DEV_LOGIN_SECRET=<paste-generated-secret>
 TASKBOT_WEB_ORIGIN=http://localhost:3000
 TASKBOT_SESSION_COOKIE_SECURE=false

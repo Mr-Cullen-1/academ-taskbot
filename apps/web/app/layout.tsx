@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Script from "next/script";
+import TaskbotApp from "./TaskbotApp";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -15,7 +16,7 @@ export default function RootLayout({
     <html lang="ru" suppressHydrationWarning>
       <body>
         <Script src="https://telegram.org/js/telegram-web-app.js?63" strategy="beforeInteractive" />
-        {children}
+        <TaskbotApp>{children}</TaskbotApp>
       </body>
     </html>
   );

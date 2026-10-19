@@ -2,6 +2,8 @@
 
 import json
 import hmac
+import base64
+import binascii
 from ipaddress import ip_address
 from typing import Awaitable, Callable
 from uuid import UUID
@@ -15,8 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from taskbot_api.models import (
     ApiIdempotency, AuditLog, LoginChallenge, LoginProof, Project, ProjectMember,
-    Task, User, UserRole, WebSession, now, utc,
+    Task, User, UserAvatar, UserRole, WebSession, now, utc,
 )
+from taskbot_api.avatar import normalize_avatar
 from taskbot_api.security import (
     AuthenticatedUser, CHALLENGE_COOKIE, COOKIE_NAME, CurrentUser, Db, TelegramProof, digest,
     new_session, new_token, require_super_admin, role_codes, verify_telegram_proof,
@@ -192,10 +195,18 @@ async def webapp_login(proof: WebAppLogin, request: Request, db: Db) -> Response
 
 
 @router.post("/auth/session/refresh")
-async def refresh_session(request: Request, db: Db, user: AuthenticatedUser) -> Response:
+async def refresh_session(request: Request, db: Db, user: AuthenticatedUser,
+                          proof: WebAppLogin | None = None) -> Response:
     settings = request.app.state.settings
     if not settings.web_origin or request.headers.get("Origin") != settings.web_origin:
         raise HTTPException(403, "ORIGIN_INVALID")
+    if proof is not None:
+        if not settings.bot_token:
+            raise HTTPException(503, "WEBAPP_LOGIN_NOT_CONFIGURED")
+        telegram_id, _ = verify_webapp_init_data(
+            proof.init_data, settings.bot_token.get_secret_value(), settings.login_max_age_seconds)
+        if telegram_id != user.telegram_user_id:
+            raise HTTPException(403, "SESSION_TELEGRAM_USER_MISMATCH")
     csrf = new_token()
     request.state.web_session.csrf_digest = digest(csrf)
     await db.commit()
@@ -238,6 +249,91 @@ async def logout(request: Request, db: Db, user: CurrentUser) -> Response:
 @router.get("/users/me")
 async def me(db: Db, user: CurrentUser) -> dict:
     return user_data(user, await role_codes(db, user.id), private=True)
+
+
+class ProfileNameChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=2, max_length=160)
+    expected_version: int = Field(ge=1)
+
+    @field_validator("name")
+    @classmethod
+    def valid_name(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 2:
+            raise ValueError("name is too short")
+        return value
+
+
+@router.patch("/users/me")
+async def update_my_profile(body: ProfileNameChange, request: Request,
+                            db: Db, actor: CurrentUser) -> Response:
+    async def perform() -> tuple[int, dict]:
+        target = await db.get(User, actor.id, with_for_update=True, populate_existing=True)
+        if target.version != body.expected_version:
+            raise HTTPException(409, "VERSION_CONFLICT")
+        if target.name != body.name:
+            target.name = body.name
+            target.version += 1
+            target.updated_at = now()
+            audit(db, actor, "user.profile_name_changed", "user", str(actor.id))
+        return 200, user_data(target, await role_codes(db, actor.id), private=True)
+
+    return await mutation(request, db, actor, body, "profile:name", perform)
+
+
+class AvatarUpload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    image_base64: str = Field(min_length=1, max_length=700000)
+
+
+class AvatarDelete(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+@router.get("/users/me/avatar")
+async def my_avatar(db: Db, actor: CurrentUser) -> Response:
+    avatar = await db.get(UserAvatar, actor.id)
+    if avatar is None:
+        raise HTTPException(404, "AVATAR_NOT_FOUND")
+    return Response(avatar.image_data, media_type=avatar.media_type,
+                    headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+
+
+@router.put("/users/me/avatar")
+async def upload_my_avatar(body: AvatarUpload, request: Request,
+                           db: Db, actor: CurrentUser) -> Response:
+    async def perform() -> tuple[int, dict]:
+        try:
+            raw = base64.b64decode(body.image_base64, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise HTTPException(422, "AVATAR_FORMAT_INVALID") from exc
+        image = normalize_avatar(raw)
+        await db.get(User, actor.id, with_for_update=True)
+        record = await db.get(UserAvatar, actor.id)
+        if record is None:
+            db.add(UserAvatar(user_id=actor.id, image_data=image, media_type="image/jpeg", updated_at=now()))
+        else:
+            record.image_data = image
+            record.updated_at = now()
+        audit(db, actor, "user.avatar_updated", "user", str(actor.id))
+        return 200, {"updated": True}
+
+    return await mutation(request, db, actor, body, "profile:avatar:put", perform)
+
+
+@router.delete("/users/me/avatar")
+async def delete_my_avatar(body: AvatarDelete, request: Request,
+                           db: Db, actor: CurrentUser) -> Response:
+    async def perform() -> tuple[int, dict]:
+        await db.get(User, actor.id, with_for_update=True)
+        record = await db.get(UserAvatar, actor.id)
+        if record is not None:
+            await db.delete(record)
+            audit(db, actor, "user.avatar_removed", "user", str(actor.id))
+        return 200, {"removed": True}
+
+    return await mutation(request, db, actor, body, "profile:avatar:delete", perform)
 
 
 @router.get("/users")
@@ -342,7 +438,7 @@ async def change_roles(user_id: UUID, body: RoleChange, request: Request,
 
 
 async def can_view_project(db: AsyncSession, user: User, project_id: UUID) -> bool:
-    if "SUPER_ADMIN" in await role_codes(db, user.id):
+    if {"SUPER_ADMIN", "TEAM_LEAD"} & await role_codes(db, user.id):
         return True
     return await db.get(ProjectMember, (project_id, user.id)) is not None
 
@@ -385,7 +481,7 @@ async def projects(db: Db, actor: CurrentUser, cursor: UUID | None = None,
     stmt = select(Project).order_by(Project.id).limit(limit)
     if cursor is not None:
         stmt = stmt.where(Project.id > cursor)
-    if "SUPER_ADMIN" not in await role_codes(db, actor.id):
+    if not {"SUPER_ADMIN", "TEAM_LEAD"} & await role_codes(db, actor.id):
         stmt = stmt.join(ProjectMember).where(ProjectMember.user_id == actor.id)
     return [project_data(p) for p in (await db.scalars(stmt)).all()]
 

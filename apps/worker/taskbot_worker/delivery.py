@@ -50,7 +50,7 @@ class TelegramTransport:
 async def project_access(db: AsyncSession, user: User, project_id: UUID) -> bool:
     if await db.get(ProjectMember, (project_id, user.id)) is not None:
         return True
-    return "SUPER_ADMIN" in await role_codes(db, user.id)
+    return bool({"SUPER_ADMIN", "TEAM_LEAD"} & await role_codes(db, user.id))
 
 
 async def put_notification(db: AsyncSession, *, recipient_id: UUID, kind: str,

@@ -138,7 +138,7 @@ async def assignment_transition(factory: async_sessionmaker[AsyncSession], teleg
                 await visible_task(db, user, task.id)
                 await transition(db, user, task, action, task.version, reason=reason,
                                  request_id=f"telegram:{update_id}")
-                return "Задача принята." if action == "accept" else "Отказ сохранён и автор уведомлён."
+                return "Задача принята." if action == "accept" else "Отказ сохранён."
         except IntegrityError:
             await db.rollback()
             if await db.get(TelegramUpdate, update_id) is not None:
@@ -154,7 +154,7 @@ async def execute(db: AsyncSession, user: User, command: str,
     if command in {"my_tasks", "created_tasks"}:
         field = Task.assignee_id if command == "my_tasks" else Task.created_by
         stmt = select(Task).where(field == user.id).order_by(Task.created_at.desc()).limit(20)
-        if "SUPER_ADMIN" not in await role_codes(db, user.id):
+        if not {"SUPER_ADMIN", "TEAM_LEAD"} & await role_codes(db, user.id):
             stmt = stmt.join(ProjectMember, ProjectMember.project_id == Task.project_id).where(
                 ProjectMember.user_id == user.id)
         rows = (await db.scalars(stmt)).all()

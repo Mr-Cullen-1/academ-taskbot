@@ -17,7 +17,7 @@ def test_migrations_create_mapped_tables():
         context = MigrationContext.configure(connection)
         with Operations.context(context):
             for name in ("0001_phase2_access.py", "0002_phase3_tasks.py",
-                         "0003_phase4_notifications.py"):
+                         "0003_phase4_notifications.py", "0004_profile_avatar.py"):
                 path = Path(__file__).parents[1] / "migrations" / "versions" / name
                 spec = importlib.util.spec_from_file_location(name.removesuffix(".py"), path)
                 module = importlib.util.module_from_spec(spec)

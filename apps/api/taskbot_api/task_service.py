@@ -1,6 +1,6 @@
 """Shared Phase 3 task rules used by HTTP and Telegram entry points."""
 
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from uuid import UUID, uuid4
 
@@ -30,6 +30,8 @@ def is_overdue(task: Task, *, today: date | None = None) -> bool:
 
 
 def as_json(task: Task) -> dict:
+    cutoff = (datetime.combine(task.current_due_date + timedelta(days=1), time.min, BUSINESS_ZONE)
+              .astimezone(timezone.utc).isoformat()) if task.current_due_date else None
     return {
         "id": str(task.id), "task_key": task.task_key, "project_id": str(task.project_id),
         "title": task.title, "description": task.description,
@@ -41,6 +43,7 @@ def as_json(task: Task) -> dict:
         "priority": task.priority, "type": task.type,
         "original_due_date": task.original_due_date.isoformat() if task.original_due_date else None,
         "current_due_date": task.current_due_date.isoformat() if task.current_due_date else None,
+        "due_cutoff_at": cutoff,
         "created_at": utc(task.created_at).isoformat() if task.created_at else None,
         "updated_at": utc(task.updated_at).isoformat() if task.updated_at else None,
         "submitted_at": utc(task.submitted_at).isoformat() if task.submitted_at else None,

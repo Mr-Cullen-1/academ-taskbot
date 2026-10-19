@@ -42,7 +42,7 @@ def create_app(settings: Settings | None = None, *, engine_override: AsyncEngine
     application.state.settings = config
     if config.web_origin:
         application.add_middleware(CORSMiddleware, allow_origins=[config.web_origin],
-                                   allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "PUT"],
+                                   allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
                                    allow_headers=["Content-Type", "X-CSRF-Token", "Idempotency-Key"])
     application.include_router(router)
     if config.dev_login_enabled:

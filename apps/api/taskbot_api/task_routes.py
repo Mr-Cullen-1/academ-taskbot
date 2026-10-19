@@ -60,7 +60,7 @@ async def list_tasks(db: Db, actor: CurrentUser, project_id: UUID | None = None,
     if not 1 <= limit <= 100:
         raise HTTPException(422, "INVALID_PAGE_LIMIT")
     stmt = select(Task).order_by(Task.id).limit(limit)
-    if "SUPER_ADMIN" not in await role_codes(db, actor.id):
+    if not {"SUPER_ADMIN", "TEAM_LEAD"} & await role_codes(db, actor.id):
         stmt = stmt.join(ProjectMember, ProjectMember.project_id == Task.project_id).where(
             ProjectMember.user_id == actor.id)
     for column, value in ((Task.project_id, project_id), (Task.status, status),

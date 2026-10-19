@@ -2,8 +2,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  devIndicators: false,
   allowedDevOrigins: [
-    "resolution-bradley-assignment-venue.trycloudflare.com",
+    "mime-raised-supplemental-egg.trycloudflare.com",
   ],
 
   async rewrites() {

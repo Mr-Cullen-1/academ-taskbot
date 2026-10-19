@@ -80,7 +80,17 @@ def test_webapp_login_validates_proof_account_session_and_csrf():
                 assert (await admin.post("/api/v1/auth/session/refresh")).status_code == 403
                 assert (await admin.post("/api/v1/auth/session/refresh",
                                          headers={"Origin": "https://wrong.example"})).status_code == 403
-                reopened = await admin.post("/api/v1/auth/session/refresh", headers={"Origin": ORIGIN})
+                assert (await admin.post("/api/v1/auth/session/refresh",
+                                         json={"init_data": signed_init_data(702)},
+                                         headers={"Origin": ORIGIN})).json()["detail"] == "SESSION_TELEGRAM_USER_MISMATCH"
+                assert (await admin.post("/api/v1/auth/session/refresh",
+                                         json={"init_data": signed_init_data(701, token="other:test-token")},
+                                         headers={"Origin": ORIGIN})).status_code == 401
+                assert (await admin.post("/api/v1/auth/session/refresh",
+                                         json={"init_data": signed_init_data(701, offset=-600)},
+                                         headers={"Origin": ORIGIN})).status_code == 401
+                reopened = await admin.post("/api/v1/auth/session/refresh",
+                                            json={"init_data": valid}, headers={"Origin": ORIGIN})
                 assert reopened.status_code == 200
                 renewed_csrf = reopened.json()["csrf_token"]
                 assert renewed_csrf != csrf
@@ -148,6 +158,34 @@ def test_session_refresh_rejects_expired_and_inactive_accounts():
                 assert (await blocked.post("/api/v1/auth/session/refresh",
                                            headers={"Origin": ORIGIN})).status_code == 403
         await engine.dispose()
+    asyncio.run(scenario())
+
+
+def test_webapp_account_switch_does_not_reuse_previous_users_session():
+    async def scenario():
+        engine, app, _, users, _, _ = await fixture()
+        try:
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                             base_url="http://localhost:8000") as client:
+                    first = await client.post("/api/v1/auth/webapp",
+                                              json={"init_data": signed_init_data(701, query_id="first")},
+                                              headers={"Origin": ORIGIN})
+                    assert first.status_code == 200
+                    second_proof = signed_init_data(702, query_id="second")
+                    mismatch = await client.post("/api/v1/auth/session/refresh",
+                                                 json={"init_data": second_proof},
+                                                 headers={"Origin": ORIGIN})
+                    assert mismatch.status_code == 403
+                    assert mismatch.json()["detail"] == "SESSION_TELEGRAM_USER_MISMATCH"
+                    switched = await client.post("/api/v1/auth/webapp",
+                                                 json={"init_data": second_proof},
+                                                 headers={"Origin": ORIGIN})
+                    assert switched.status_code == 200
+                    assert switched.json()["user"]["id"] == str(users[702])
+                    assert (await client.get("/api/v1/users/me")).json()["id"] == str(users[702])
+        finally:
+            await engine.dispose()
     asyncio.run(scenario())
 
 

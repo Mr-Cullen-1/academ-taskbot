@@ -20,6 +20,7 @@ from taskbot_api.main import create_app
 from taskbot_api.models import AuditLog, OutboxEvent, Project, ProjectMember, Task, TaskComment, TaskEvent, TaskKeySequence, User, UserRole
 from taskbot_api.task_service import create_task, is_overdue
 from taskbot_bot.__main__ import build_dispatcher
+from taskbot_bot.tasks import assignment_transition
 
 
 ORIGIN = "http://localhost:3000"
@@ -113,6 +114,7 @@ def test_task_creation_access_validation_and_edit():
                 assert task["status"] == "OPEN" and task["qa_review_status"] == "PENDING"
                 assert task["created_by"] == str(users[703]) and task["assignee_id"] == str(users[704])
                 assert task["original_due_date"] == "2027-01-01"
+                assert task["due_cutoff_at"] == "2027-01-01T19:00:00+00:00"
                 assert (await author.post("/api/v1/tasks", headers=headers(author_csrf),
                     json={"project_id": str(project), "title": "Missing due date"})).status_code == 422
                 assert (await outsider.get(f"/api/v1/tasks/{task['id']}")).status_code == 404
@@ -376,6 +378,33 @@ def test_bot_lists_details_and_changes_task_without_sending_messages():
                 assert len((await db.scalars(select(TaskComment).where(TaskComment.task_id == task.id))).all()) == 1
         finally:
             await bot.session.close()
+            await engine.dispose()
+    asyncio.run(scenario())
+
+
+def test_bot_refusal_confirms_saved_action_without_claiming_delivery():
+    async def scenario():
+        engine, _, factory, users, project, _ = await fixture()
+        try:
+            async with factory() as db:
+                async with db.begin():
+                    author = await db.get(User, users[703])
+                    task = await create_task(db, author, project_id=project, title="Refusal",
+                                             description="", assignee_id=users[704],
+                                             qa_reviewer_id=None, priority="MEDIUM",
+                                             type="DEVELOPMENT", due_date=date(2027, 1, 1))
+                    task_id = task.id
+            reply = await assignment_transition(factory, 704, 8101, task_id, "reject", "No capacity")
+            assert reply == "Отказ сохранён."
+            assert await assignment_transition(factory, 704, 8101, task_id, "reject", "No capacity") == "Действие уже обработано."
+            async with factory() as db:
+                current = await db.get(Task, task_id)
+                events = (await db.scalars(select(TaskEvent).where(TaskEvent.task_id == task_id))).all()
+                outbox = (await db.scalars(select(OutboxEvent).where(OutboxEvent.aggregate_id == str(task_id)))).all()
+                assert current.status == "REJECTED"
+                assert events[-1].after_data["reason"] == "No capacity"
+                assert len(outbox) == 2 and all(row.state == "UNPROCESSED" for row in outbox)
+        finally:
             await engine.dispose()
     asyncio.run(scenario())
 

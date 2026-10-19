@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from taskbot_api.models import Project, ProjectMember, Task, TaskEvent, User, WeeklyReport, now, utc
+from taskbot_api.models import Project, Task, TaskEvent, User, WeeklyReport, now, utc
 from taskbot_api.security import role_codes
 from taskbot_api.task_service import is_overdue
 
@@ -46,12 +46,8 @@ async def report_projects(db: AsyncSession, recipient: User) -> list[Project]:
     if recipient.status != "ACTIVE":
         raise HTTPException(403, "FORBIDDEN")
     roles = await role_codes(db, recipient.id)
-    if "SUPER_ADMIN" in roles:
+    if {"SUPER_ADMIN", "TEAM_LEAD"} & roles:
         statement = select(Project).order_by(Project.name, Project.id)
-    elif "TEAM_LEAD" in roles:
-        statement = (select(Project).join(ProjectMember, Project.id == ProjectMember.project_id)
-                     .where(ProjectMember.user_id == recipient.id)
-                     .order_by(Project.name, Project.id))
     else:
         raise HTTPException(403, "FORBIDDEN")
     return (await db.scalars(statement)).all()

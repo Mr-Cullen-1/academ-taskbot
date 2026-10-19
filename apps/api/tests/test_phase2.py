@@ -258,15 +258,16 @@ def test_approval_rejection_roles_projects_and_block():
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost:8000") as member:
                     member_login = await login(member, 203)
                     member_csrf = member_login.json()["csrf_token"]
-                    assert (await member.get("/api/v1/projects")).json() == []
-                    assert (await member.get(f"/api/v1/projects/{project_id}")).status_code == 404
+                    assert {row["name"] for row in (await member.get("/api/v1/projects")).json()} == {
+                        "Admin project", "PM project", "Replay"}
+                    assert (await member.get(f"/api/v1/projects/{project_id}")).status_code == 200
                     assert (await member.post("/api/v1/projects", json={"name": "Forbidden"},
                         headers=mutation_headers(member_csrf))).status_code == 403
                     added = await admin.put(f"/api/v1/projects/{project_id}/members",
                         json={"members": [by_telegram[202]["id"], by_telegram[203]["id"]], "expected_version": 1},
                         headers=mutation_headers(csrf))
                     assert added.status_code == 200
-                    assert len((await member.get("/api/v1/projects")).json()) == 1
+                    assert len((await member.get("/api/v1/projects")).json()) == 3
                     blocked = await admin.patch(f"/api/v1/users/{by_telegram[203]['id']}/status",
                         json={"status": "BLOCKED", "expected_version": 2}, headers=mutation_headers(csrf))
                     assert blocked.status_code == 200

@@ -287,18 +287,18 @@ def test_one_hour_alert_to_author_and_project_team_leads_once():
                     db.add_all([UserRole(user_id=users[703], code="TEAM_LEAD"),
                                 UserRole(user_id=users[708], code="TEAM_LEAD"),
                                 UserRole(user_id=users[706], code="TEAM_LEAD")])
-            assert await schedule_reaction_reminders(factory, settings()) == 3
+            assert await schedule_reaction_reminders(factory, settings()) == 4
             assert await schedule_reaction_reminders(factory, settings()) == 0
             async with factory() as db:
                 alerts = (await db.scalars(select(Notification).where(
                     Notification.task_id == task_id, Notification.kind == "NO_RESPONSE_ALERT"))).all()
-                assert {row.recipient_user_id for row in alerts} == {users[703], users[708]}
+                assert {row.recipient_user_id for row in alerts} == {users[703], users[708], users[706]}
                 assert users[702] not in {row.recipient_user_id for row in alerts}
                 first_due = min(row.scheduled_at.replace(tzinfo=timezone.utc) for row in alerts)
             fake = FakeTransport()
             assert await deliver_notifications(factory, fake, settings(), at=first_due - timedelta(seconds=1)) == 0
-            assert await deliver_notifications(factory, fake, settings(), at=first_due) == 2
-            assert {chat_id for chat_id, _, _ in fake.sent} == {703, 708}
+            assert await deliver_notifications(factory, fake, settings(), at=first_due) == 3
+            assert {chat_id for chat_id, _, _ in fake.sent} == {703, 708, 706}
         finally:
             await engine.dispose()
     asyncio.run(scenario())
@@ -458,14 +458,15 @@ def test_report_delivery_scope_and_api():
                         assert len((await admin.get("/api/v1/reports/weekly", params=params)).json()["projects"]) == 2
                         lead_report = await lead.get("/api/v1/reports/weekly", params=params)
                         assert lead_report.status_code == 200
-                        assert [row["project_id"] for row in lead_report.json()["projects"]] == [str(project)]
+                        assert len(lead_report.json()["projects"]) == 2
+                        assert str(project) in {row["project_id"] for row in lead_report.json()["projects"]}
                         assert (await pm.get("/api/v1/reports/weekly", params=params)).status_code == 403
         finally:
             await engine.dispose()
     asyncio.run(scenario())
 
 
-def test_weekly_report_is_not_sent_after_team_lead_loses_project_access():
+def test_weekly_report_remains_available_after_team_lead_loses_membership():
     async def scenario():
         engine, _, factory, users, project, _ = await fixture()
         try:
@@ -479,12 +480,12 @@ def test_weekly_report_is_not_sent_after_team_lead_loses_project_access():
                     await db.delete(await db.get(ProjectMember, (project, users[703])))
             fake = FakeTransport()
             assert await deliver_notifications(factory, fake, settings(), at=instant) == 2
-            assert {chat_id for chat_id, _, _ in fake.sent} == {701}
+            assert {chat_id for chat_id, _, _ in fake.sent} == {701, 703}
             async with factory() as db:
-                skipped = await db.scalar(select(Notification).where(
+                delivered = await db.scalar(select(Notification).where(
                     Notification.recipient_user_id == users[703],
                     Notification.kind == "WEEKLY_REPORT"))
-                assert skipped.state == "SKIPPED"
+                assert delivered.state == "SENT"
         finally:
             await engine.dispose()
     asyncio.run(scenario())

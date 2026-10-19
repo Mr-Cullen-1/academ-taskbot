@@ -117,9 +117,7 @@ async def schedule_reaction_reminders(factory: async_sessionmaker[AsyncSession],
                 alert_at = utc(assignment.occurred_at) + timedelta(hours=1)
                 lead_ids = (await db.scalars(
                     select(User.id).join(UserRole, UserRole.user_id == User.id)
-                    .join(ProjectMember, ProjectMember.user_id == User.id)
-                    .where(User.status == "ACTIVE", UserRole.code == "TEAM_LEAD",
-                           ProjectMember.project_id == task.project_id)
+                    .where(User.status == "ACTIVE", UserRole.code == "TEAM_LEAD")
                 )).all()
                 for target_id in set([task.created_by, *lead_ids]):
                     target = await db.get(User, target_id)
