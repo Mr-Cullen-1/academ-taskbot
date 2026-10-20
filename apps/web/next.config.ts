@@ -4,7 +4,7 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   devIndicators: false,
   allowedDevOrigins: [
-    "mime-raised-supplemental-egg.trycloudflare.com",
+    "uncle-msie-mix-minerals.trycloudflare.com",
   ],
 
   async rewrites() {
