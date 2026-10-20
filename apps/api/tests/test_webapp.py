@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import httpx
 from aiogram import Bot
-from aiogram.types import Chat, InlineKeyboardMarkup, Message, Update, User as TelegramUser
+from aiogram.types import Chat, ReplyKeyboardMarkup, Message, Update, User as TelegramUser
 from sqlalchemy import select
 
 from taskbot_api.config import Settings
@@ -199,10 +199,13 @@ def test_active_start_includes_webapp_button_without_contact_flow():
             with patch.object(Message, "answer", new_callable=AsyncMock) as answer:
                 await build_dispatcher().feed_update(bot, Update(update_id=9701, message=message),
                     registration_factory=factory, webapp_url="https://example.test/taskbot")
-                assert answer.await_count == 1
-                markup = answer.call_args.kwargs["reply_markup"]
-                assert isinstance(markup, InlineKeyboardMarkup)
-                assert markup.inline_keyboard[0][0].web_app.url == "https://example.test/taskbot"
+                assert answer.await_count == 2
+                markup = answer.await_args_list[0].kwargs["reply_markup"]
+                assert isinstance(markup, ReplyKeyboardMarkup)
+                assert markup.keyboard[0][0].web_app.url == "https://example.test/taskbot"
+                assert markup.is_persistent
+                inline = answer.await_args_list[1].kwargs["reply_markup"]
+                assert inline.inline_keyboard[0][0].web_app.url == "https://example.test/taskbot"
         finally:
             await bot.session.close()
             await engine.dispose()

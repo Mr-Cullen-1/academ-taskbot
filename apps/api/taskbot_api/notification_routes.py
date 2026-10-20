@@ -2,22 +2,31 @@
 
 from datetime import date
 
-from fastapi import APIRouter, HTTPException
+from uuid import UUID
+
+from fastapi import APIRouter, HTTPException, Request, Response
+from pydantic import BaseModel
 from sqlalchemy import select
 
 from taskbot_api.models import Notification, now, utc
 from taskbot_api.reporting import report_projects, report_week, visible_saved_report
+from taskbot_api.routes import mutation
 from taskbot_api.security import CurrentUser, Db
 
 
 router = APIRouter(prefix="/api/v1", tags=["notifications", "reports"])
 
 
+class EmptyBody(BaseModel):
+    pass
+
+
 def notification_json(row: Notification) -> dict:
     return {"id": str(row.id), "task_id": str(row.task_id) if row.task_id else None,
             "kind": row.kind, "body": row.body, "state": row.state,
             "scheduled_at": utc(row.scheduled_at).isoformat(),
-            "sent_at": utc(row.sent_at).isoformat() if row.sent_at else None}
+            "sent_at": utc(row.sent_at).isoformat() if row.sent_at else None,
+            "read_at": utc(row.read_at).isoformat() if row.read_at else None}
 
 
 @router.get("/notifications")
@@ -28,6 +37,21 @@ async def my_notifications(db: Db, actor: CurrentUser, limit: int = 50) -> list[
                              .order_by(Notification.created_at.desc(), Notification.id.desc())
                              .limit(limit))).all()
     return [notification_json(row) for row in rows]
+
+
+@router.post("/notifications/{notification_id}/read")
+async def read_notification(notification_id: UUID, request: Request,
+                            db: Db, actor: CurrentUser) -> Response:
+    async def perform() -> tuple[int, dict]:
+        row = await db.get(Notification, notification_id, with_for_update=True)
+        if row is None or row.recipient_user_id != actor.id:
+            raise HTTPException(404, "NOT_FOUND")
+        if row.read_at is None:
+            row.read_at = now()
+        return 200, notification_json(row)
+
+    return await mutation(request, db, actor, EmptyBody(),
+                          f"notification:read:{notification_id}", perform)
 
 
 @router.get("/reports/weekly")

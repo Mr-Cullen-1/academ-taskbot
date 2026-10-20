@@ -8,7 +8,7 @@
 - projects 1:N sprints, project_teams и tasks. У sprint один project; task.sprint_id допускает NULL и обязан ссылаться на тот же проект.
 - project_teams M:N users через project_team_members; команда существует внутри одного проекта, её участник также является project_members этого проекта.
 - tasks N:1 users как неизменяемый created_by; у задачи не более одного основного assignee_id. При создании автор может выбрать Active участника проекта либо оставить OPEN без assignee до назначения PM; до назначения assignee переход accept недоступен. Отдельный qa_reviewer_id? указывает одного Active участника проекта с ролью QA и не заменяет основного исполнителя. tasks M:N users через task_watchers.
-- tasks 1:N comments, task_attachments, task_events, deadline_requests, notifications, reminders; tasks M:N tasks через task_dependencies.
+- tasks 1:N comments, task_attachments, task_events, deadline_requests, notifications, personal_reminders; tasks M:N tasks через task_dependencies.
 - deadline_requests 1:0..1 deadline_changes при одобрении. deadline_changes и task_events сохраняют историю изменения сроков.
 - task_events 1:N outbox_events; notifications 1:N notification_attempts. Outbox может порождать уведомления/отчёты.
 - users 1:N sessions и idempotency_keys. external_links связываются с внутренним объектом разрешённого типа.
@@ -24,21 +24,21 @@
 | sessions | id, user_id, issued_at, expires_at, revoked_at?, credential_digest | Существующие серверные сессии используются Mini App после проверки raw initData; отзываются при Blocked. Новая таблица для входа Mini App не требуется. |
 | projects | id, name, description, owner_user_id, status, version, created_at, updated_at, archived_at? | Одна компания, без tenant_id. Создатель становится участником проекта; назначенный владелец — Active участник проекта. |
 | project_members | id, project_id, user_id, joined_at, left_at? | Членство даёт Active пользователю доступ к проекту; одна текущая запись на пару. PM без членства не видит чужой проект, Super Admin и Team Lead читают все проекты без членства. |
-| project_teams | id, project_id, name, archived_at? | Команды внутри проекта. |
-| project_team_members | id, team_id, user_id, joined_at, left_at? | Членство в команде при членстве в проекте. |
-| sprints | id, project_id, name, starts_at, ends_at, status, version, archived_at? | Даты и статус; точный календарный формат в OQ-06. |
+| project_teams | id, project_id, name, created_at, version | Команды внутри проекта. |
+| project_team_members | team_id, user_id, joined_at | Членство в команде при активном членстве в проекте. |
+| sprints | id, project_id, name, starts_on, ends_on, created_at, version | Календарные даты Asia/Tashkent; статуса нет. |
 | tasks | id, task_key UNIQUE, project_id, sprint_id?, title, description, created_by, assignee_id?, qa_reviewer_id?, qa_review_status?, status, priority, type, original_due_date, current_due_date, created_at, updated_at, completed_at?, version, archived_at? | Не более одного основного исполнителя; автор может выбрать его при создании, позднее назначает PM. Автор выбирает QA-проверяющего отдельно. qa_review_status: NULL без QA, иначе PENDING/REWORK/DONE; это не tasks.status. created_by неизменяем. Обе даты срока обязательны, тип DATE. |
-| task_dependencies | id, task_id, depends_on_task_id, created_by, created_at | UNIQUE(task_id, depends_on_task_id), запрет самоссылки и циклов. |
-| task_watchers | id, task_id, user_id, added_at | UNIQUE(task_id, user_id); не соисполнители. |
+| task_dependencies | task_id, depends_on_task_id, created_at | Составной PK; только один проект, запрет самоссылки и циклов; переходы не блокируются. |
+| task_watchers | task_id, user_id, created_at | Составной PK; не соисполнители. |
 | comments | id, task_id, author_user_id, body, created_at, archived_at? | Комментарии и обязательные причины переходов; связь с event при необходимости. |
-| task_attachments | id, task_id, uploaded_by, object_key, filename, media_type, size_bytes, created_at, archived_at? | Только метаданные; объект приватен. |
+| task_attachments | id, task_id, uploader_user_id, object_key UNIQUE, filename, content_type, size_bytes, sha256, created_at, deleted_at? | Только метаданные; объект в приватном Supabase Storage, до 10 МБ. Удаление автором или Super Admin с аудитом. |
 | task_events | id, task_id, sequence, actor_user_id?, type, before_data, after_data, approval_mode?, original_author_user_id?, author_unavailable_confirmed?, intervention_reason?, occurred_at, request_id | Append-only история; UNIQUE(task_id, sequence). Для REVIEW→DONE approval_mode=AUTHOR или ADMIN_OVERRIDE; при ADMIN_OVERRIDE обязательны actor_user_id=фактический Super Admin, original_author_user_id=tasks.created_by, author_unavailable_confirmed=true и intervention_reason. |
 | deadline_requests | id, task_id, requested_by, proposed_due_date, reason, progress_note, status, version, decided_by?, decided_at?, created_at | Pending, Approved, Rejected; до Approved текущий срок не меняется. |
-| deadline_changes | id, task_id, request_id?, old_due_date, new_due_date, decided_by, decided_at, reason | История всех одобренных изменений; request_id UNIQUE если запрос был основанием. |
-| reminders | id, owner_user_id, task_id?, remind_at, text?, state, version, created_at, updated_at | Личные напоминания отдельно от метрик и системных уведомлений. |
-| notifications | id, task_id?, recipient_user_id, subject_user_id?, source_event_id?, kind, dedupe_key UNIQUE, body, scheduled_at, due_date_snapshot?, state, attempts, lease_until?, last_error_code?, sent_at?, created_at | Логическое уведомление Phase 4; адресат определяется сервером, снимок даты отсекает устаревшее напоминание. |
+| deadline_changes | id, task_id, request_id UNIQUE, previous_due_date, new_due_date, approved_by, approved_at | История одобренных изменений; original_due_date неизменяем. |
+| personal_reminders | id, owner_user_id, task_id?, remind_at, text, version, cancelled_at?, created_at | Личные напоминания отдельно от метрик и системных уведомлений. |
+| notifications | id, task_id?, recipient_user_id, subject_user_id?, source_event_id?, kind, dedupe_key UNIQUE, body, scheduled_at, due_date_snapshot?, state, attempts, lease_until?, last_error_code?, sent_at?, read_at?, created_at | Логическое уведомление; адресат определяется сервером, снимок даты отсекает устаревшее напоминание. |
 | notification_attempts | id, notification_id, attempted_at, result, error_code? | Журнал попыток; номер попытки хранится в notifications.attempts. |
-| weekly_reports | id, recipient_user_id, week_start, generated_at, payload | UNIQUE(recipient_user_id, week_start); снимок недели для Telegram и API; Super Admin видит все проекты, Team Lead — все проекты. |
+| weekly_reports | id, recipient_user_id, week_start, generated_at, payload | UNIQUE(recipient_user_id, week_start); снимок недели для Telegram и API; Super Admin и Team Lead видят все проекты, PM — доступные. |
 | outbox_events | id, aggregate_type, aggregate_id, source_event_id?, kind, payload, dedupe_key UNIQUE, state, available_at, created_at, processed_at? | Транзакционная запись для worker; без Telegram-вызова в транзакции задачи. |
 | audit_logs | id, actor_user_id?, action, target_type, target_id?, source_event_id?, original_author_user_id?, author_unavailable_confirmed?, reason?, outcome, occurred_at, request_id, metadata | Операции доступа и администрации; ADMIN_OVERRIDE связан с task_event, хранит фактического актора, исходного автора, явное подтверждение, причину и время; без секретов. |
 | external_links | id, provider, external_id, target_type, target_id, created_at | UNIQUE(provider, external_id), задел для будущей интеграции Notion. |
@@ -58,7 +58,7 @@
 - task_key уникален глобально; генератор должен выдерживать конкуренцию. Telegram ID и chat ID требуют типа, не усекающего более 32 бит.
 - Индексы: tasks(project_id,status,current_due_date), tasks(assignee_id,status), tasks(created_by,created_at), tasks(sprint_id); project_members(project_id,user_id), deadline_requests(task_id,status), task_events(task_id,sequence), notifications(recipient_user_id,state,scheduled_at), outbox_events(state,available_at), audit_logs(occurred_at,actor_user_id). Физическая настройка после оценки запросов.
 - Архивирование users/projects/tasks не должно каскадно стирать task_events, deadline_changes, audit_logs и попытки доставки. Логическая схема предлагает archived_at и запрет новых операций над архивными объектами; точные правила видимости и хранения — OQ-10.
-- Уникальные ограничения на активное членство и роль должны учитывать left_at/revoked_at; способ частичных индексов определить в физической схеме. Схема не реализована.
+- Текущая физическая модель использует составные ключи для действующего членства и фиксированные роли. Историческое членство через left_at/revoked_at не вводится без отдельного решения; аудит изменений доступа сохраняется отдельно. Таблицы расширения MVP подготовлены миграцией `0006_mvp_entities`, но не применены к рабочей Supabase.
 
 ## Атомарность
 

@@ -3,7 +3,7 @@
 from datetime import date, datetime, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, ForeignKey, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, JSON, LargeBinary, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from taskbot_api.db import Base
@@ -124,6 +124,35 @@ class ProjectMember(Base):
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class ProjectTeam(Base):
+    __tablename__ = "project_teams"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_project_team_name"),)
+
+
+class ProjectTeamMember(Base):
+    __tablename__ = "project_team_members"
+    team_id: Mapped[UUID] = mapped_column(ForeignKey("project_teams.id"), primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Sprint(Base):
+    __tablename__ = "sprints"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    starts_on: Mapped[date] = mapped_column(Date, nullable=False)
+    ends_on: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    __table_args__ = (CheckConstraint("ends_on >= starts_on", name="ck_sprint_range"),)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -146,6 +175,7 @@ class Task(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     task_key: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
     project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    sprint_id: Mapped[UUID | None] = mapped_column(ForeignKey("sprints.id"), index=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
@@ -197,6 +227,79 @@ class TaskComment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class TaskAttachment(Base):
+    __tablename__ = "task_attachments"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    task_id: Mapped[UUID] = mapped_column(ForeignKey("tasks.id"), nullable=False, index=True)
+    uploader_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    object_key: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    filename: Mapped[str] = mapped_column(String(200), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TaskWatcher(Base):
+    __tablename__ = "task_watchers"
+    task_id: Mapped[UUID] = mapped_column(ForeignKey("tasks.id"), primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class TaskDependency(Base):
+    __tablename__ = "task_dependencies"
+    task_id: Mapped[UUID] = mapped_column(ForeignKey("tasks.id"), primary_key=True)
+    depends_on_task_id: Mapped[UUID] = mapped_column(ForeignKey("tasks.id"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    __table_args__ = (CheckConstraint("task_id <> depends_on_task_id", name="ck_dependency_not_self"),)
+
+
+class DeadlineRequest(Base):
+    __tablename__ = "deadline_requests"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    task_id: Mapped[UUID] = mapped_column(ForeignKey("tasks.id"), nullable=False, index=True)
+    requested_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    proposed_due_date: Mapped[date] = mapped_column(Date, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    progress_note: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    decided_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    __table_args__ = (
+        CheckConstraint("status IN ('PENDING','APPROVED','REJECTED')", name="ck_deadline_request_status"),
+        Index("uq_deadline_request_pending", "task_id", unique=True,
+              postgresql_where=text("status = 'PENDING'"), sqlite_where=text("status = 'PENDING'")),
+    )
+
+
+class DeadlineChange(Base):
+    __tablename__ = "deadline_changes"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    request_id: Mapped[UUID] = mapped_column(ForeignKey("deadline_requests.id"), nullable=False, unique=True)
+    task_id: Mapped[UUID] = mapped_column(ForeignKey("tasks.id"), nullable=False, index=True)
+    previous_due_date: Mapped[date] = mapped_column(Date, nullable=False)
+    new_due_date: Mapped[date] = mapped_column(Date, nullable=False)
+    approved_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PersonalReminder(Base):
+    __tablename__ = "personal_reminders"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    owner_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    task_id: Mapped[UUID | None] = mapped_column(ForeignKey("tasks.id"))
+    remind_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class OutboxEvent(Base):
     __tablename__ = "outbox_events"
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -207,6 +310,8 @@ class OutboxEvent(Base):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     dedupe_key: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     state: Mapped[str] = mapped_column(String(20), nullable=False, default="UNPROCESSED")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error_code: Mapped[str | None] = mapped_column(String(80))
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -230,6 +335,7 @@ class Notification(Base):
     last_error_code: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (CheckConstraint("state IN ('PENDING','SENDING','RETRY','SENT','SIMULATED','SKIPPED','FAILED')", name="ck_notification_state"),)
 
 

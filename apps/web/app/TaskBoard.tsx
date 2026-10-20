@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 type Person = { id: string; name: string; roles: string[] };
 type Project = { id: string; name: string };
 type Task = {
-  id: string; task_key: string; project_id: string; title: string; description: string;
+  id: string; task_key: string; project_id: string; sprint_id: string | null; title: string; description: string;
   created_by: string; assignee_id: string | null; qa_reviewer_id: string | null;
   qa_review_status: string | null; qa_review_passed: boolean; status: string; priority: string; type: string;
   current_due_date: string; overdue: boolean; submitted_at: string | null; completed_at: string | null;
@@ -13,6 +13,12 @@ type Task = {
 };
 type Event = { id: string; sequence: number; actor_user_id: string; type: string; after_data: Record<string, unknown>; occurred_at: string };
 type Comment = { id: string; author_user_id: string; body: string; created_at: string };
+type Sprint = { id: string; name: string; starts_on: string; ends_on: string };
+type DeadlineRequest = { id: string; requested_by: string; proposed_due_date: string; reason: string;
+  progress_note: string; status: string; version: number; decision_reason: string | null };
+type Watcher = { user_id: string };
+type Dependency = { depends_on_task_id: string };
+type Attachment = { id: string; uploader_user_id: string; filename: string; content_type: string; size_bytes: number };
 
 const priorities = ["URGENT", "HIGH", "MEDIUM", "LOW"];
 const types = ["DEVELOPMENT", "BUG_FIX", "IMPROVEMENT", "QA_CHECK", "RESEARCH"];
@@ -49,6 +55,23 @@ export default function TaskBoard({ api, person, projects, view, taskId, navigat
   const [events, setEvents] = useState<Event[]>([]);
   const [qaReviews, setQaReviews] = useState<Event[]>([]);
   const [comments, setComments] = useState<Comment[]>([]);
+  const [sprints, setSprints] = useState<Sprint[]>([]);
+  const [createSprints, setCreateSprints] = useState<Sprint[]>([]);
+  const [createSprint, setCreateSprint] = useState("");
+  const [chosenSprint, setChosenSprint] = useState("");
+  const [deadlineRequests, setDeadlineRequests] = useState<DeadlineRequest[]>([]);
+  const [proposedDue, setProposedDue] = useState("");
+  const [extensionReason, setExtensionReason] = useState("");
+  const [progressNote, setProgressNote] = useState("");
+  const [decisionReason, setDecisionReason] = useState("");
+  const [watchers, setWatchers] = useState<Watcher[]>([]);
+  const [dependencies, setDependencies] = useState<Dependency[]>([]);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
+  const [downloadLinks, setDownloadLinks] = useState<Record<string, string>>({});
+  const uploadAttempt = useRef<{ file: File; key: string } | null>(null);
+  const [dependencyTarget, setDependencyTarget] = useState("");
+  const [dependencyCandidates, setDependencyCandidates] = useState<Task[]>([]);
   const [members, setMembers] = useState<Person[]>([]);
   const [createMembers, setCreateMembers] = useState<Person[]>([]);
   const [filterMembers, setFilterMembers] = useState<Person[]>([]);
@@ -151,12 +174,17 @@ export default function TaskBoard({ api, person, projects, view, taskId, navigat
     setError("");
     if (selected?.id !== id) setSelected(null);
     try {
-      const [task, history, qaHistory, discussion] = await Promise.all([
+      const [task, history, qaHistory, discussion, extensions, watching, links, files] = await Promise.all([
       request(`/tasks/${id}`), request(`/tasks/${id}/events`),
       request(`/tasks/${id}/qa-reviews`), request(`/tasks/${id}/comments`),
+      request(`/tasks/${id}/deadline-requests`), request(`/tasks/${id}/watchers`),
+      request(`/tasks/${id}/dependencies`), request(`/tasks/${id}/attachments`),
       ]);
       if (requestId === detailRequest.current) {
         setSelected(task); setEvents(history); setQaReviews(qaHistory); setComments(discussion);
+        setDeadlineRequests(extensions); setWatchers(watching); setDependencies(links); setAttachments(files);
+        setDownloadLinks({}); setAttachmentFile(null);
+        setChosenSprint(task.sprint_id || "");
         setTitle(task.title); setDescription(task.description);
         setAssignee(task.assignee_id || ""); setReviewer(task.qa_reviewer_id || "");
         setPriority(task.priority); setType(task.type);
@@ -208,11 +236,36 @@ export default function TaskBoard({ api, person, projects, view, taskId, navigat
   }, [createProject]);
   useEffect(() => {
     let cancelled = false;
+    setCreateSprints([]);
+    setCreateSprint("");
+    if (createProject) void request(`/projects/${createProject}/sprints`)
+      .then((rows) => { if (!cancelled) setCreateSprints(rows); })
+      .catch((e) => { if (!cancelled) setError(e.message); });
+    return () => { cancelled = true; };
+  }, [createProject]);
+  useEffect(() => {
+    let cancelled = false;
     setMembers([]);
     void (async () => {
       const rows = selected ? await request(`/projects/${selected.project_id}/members`) : [];
       if (!cancelled) setMembers(rows);
     })().catch((e) => { if (!cancelled) setError(e.message); });
+    return () => { cancelled = true; };
+  }, [selected?.project_id]);
+  useEffect(() => {
+    let cancelled = false;
+    setDependencyCandidates([]);
+    if (selected?.project_id) void request(`/tasks?project_id=${selected.project_id}&limit=100`)
+      .then((rows) => { if (!cancelled) setDependencyCandidates(rows); })
+      .catch((e) => { if (!cancelled) setError(e.message); });
+    return () => { cancelled = true; };
+  }, [selected?.project_id]);
+  useEffect(() => {
+    let cancelled = false;
+    setSprints([]);
+    if (selected?.project_id) void request(`/projects/${selected.project_id}/sprints`)
+      .then((rows) => { if (!cancelled) setSprints(rows); })
+      .catch((e) => { if (!cancelled) setError(e.message); });
     return () => { cancelled = true; };
   }, [selected?.project_id]);
   useEffect(() => {
@@ -230,7 +283,8 @@ export default function TaskBoard({ api, person, projects, view, taskId, navigat
     await withMutation(async () => {
     try {
       const task: Task = await mutate("/tasks", "POST", {
-        project_id: createProject, title: createTitle, description: createDescription,
+        project_id: createProject, sprint_id: createSprint || null,
+        title: createTitle, description: createDescription,
         assignee_id: createAssignee || null, qa_reviewer_id: createReviewer || null,
         priority: createPriority, type: createType,
         due_date: createDue,
@@ -291,6 +345,108 @@ export default function TaskBoard({ api, person, projects, view, taskId, navigat
     });
   }
 
+  async function requestExtension() {
+    if (!selected) return;
+    await withMutation(async () => {
+      try {
+        await mutate(`/tasks/${selected.id}/deadline-requests`, "POST", {
+          expected_version: selected.version, proposed_due_date: proposedDue,
+          reason: extensionReason, progress_note: progressNote,
+        });
+        setProposedDue(""); setExtensionReason(""); setProgressNote(""); setError("");
+        await selectTask(selected.id);
+      } catch (e) { setError((e as Error).message); }
+    });
+  }
+  async function decideExtension(item: DeadlineRequest, approve: boolean) {
+    if (!selected) return;
+    await withMutation(async () => {
+      try {
+        await mutate(`/deadline-requests/${item.id}/${approve ? "approve" : "reject"}`, "POST", {
+          expected_version: item.version, reason: decisionReason || null,
+        });
+        setDecisionReason(""); setError(""); await selectTask(selected.id); await loadTasks();
+      } catch (e) { setError((e as Error).message); }
+    });
+  }
+  async function changeWatcher(watch: boolean) {
+    if (!selected) return;
+    await withMutation(async () => {
+      try {
+        await mutate(watch ? `/tasks/${selected.id}/watchers` :
+          `/tasks/${selected.id}/watchers/${person.id}`, watch ? "POST" : "DELETE",
+        watch ? { user_id: person.id } : {});
+        setWatchers(await request(`/tasks/${selected.id}/watchers`)); setError("");
+      } catch (e) { setError((e as Error).message); }
+    });
+  }
+  async function addDependency() {
+    if (!selected || !dependencyTarget) return;
+    await withMutation(async () => {
+      try {
+        await mutate(`/tasks/${selected.id}/dependencies`, "POST", {
+          depends_on_task_id: dependencyTarget,
+        });
+        setDependencyTarget(""); setDependencies(await request(`/tasks/${selected.id}/dependencies`));
+        await selectTask(selected.id); setError("");
+      } catch (e) { setError((e as Error).message); }
+    });
+  }
+  async function saveSprint() {
+    if (!selected) return;
+    await withMutation(async () => {
+      try {
+        await mutate(`/tasks/${selected.id}/sprint`, "PUT", {
+          expected_version: selected.version, sprint_id: chosenSprint || null,
+        });
+        await selectTask(selected.id); setError("");
+      } catch (e) { setError((e as Error).message); }
+    });
+  }
+  async function uploadAttachment() {
+    if (!selected || !attachmentFile) return;
+    await withMutation(async () => {
+      try {
+        const file = attachmentFile;
+        if (file.size > 10 * 1024 * 1024) throw new Error("Файл должен быть не больше 10 МБ.");
+        const csrf = sessionStorage.getItem("taskbot_csrf");
+        if (!csrf) throw new Error("Откройте приложение заново из Telegram.");
+        if (uploadAttempt.current?.file !== file) uploadAttempt.current = { file, key: crypto.randomUUID() };
+        const suffix = file.name.toLowerCase().split(".").pop();
+        const media = file.type || ({ pdf: "application/pdf", png: "image/png", jpg: "image/jpeg",
+          jpeg: "image/jpeg", txt: "text/plain" } as Record<string, string>)[suffix || ""] || "application/octet-stream";
+        const response = await fetch(`${api}/api/v1/tasks/${selected.id}/attachments?filename=${encodeURIComponent(file.name)}`, {
+          method: "POST", credentials: "include", headers: {
+            "Content-Type": media, "X-CSRF-Token": csrf,
+            "Idempotency-Key": uploadAttempt.current.key,
+          }, body: file,
+        });
+        if (!response.ok) {
+          if (response.status < 500) uploadAttempt.current = null;
+          throw await apiError(response);
+        }
+        uploadAttempt.current = null; setAttachmentFile(null);
+        setAttachments(await request(`/tasks/${selected.id}/attachments`)); setError("");
+      } catch (e) { setError((e as Error).message); }
+    });
+  }
+  async function getDownloadLink(item: Attachment) {
+    if (!selected) return;
+    try {
+      const result: { url: string } = await request(`/tasks/${selected.id}/attachments/${item.id}/download`);
+      setDownloadLinks((current) => ({ ...current, [item.id]: result.url })); setError("");
+    } catch (e) { setError((e as Error).message); }
+  }
+  async function deleteAttachment(item: Attachment) {
+    if (!selected) return;
+    await withMutation(async () => {
+      try {
+        await mutate(`/tasks/${selected.id}/attachments/${item.id}`, "DELETE", {});
+        setAttachments(await request(`/tasks/${selected.id}/attachments`)); setError("");
+      } catch (e) { setError((e as Error).message); }
+    });
+  }
+
   return <section className="tasks">
     {error && <p role="alert">{error}</p>}
     {view === "list" && <>
@@ -332,6 +488,9 @@ export default function TaskBoard({ api, person, projects, view, taskId, navigat
       <label>Проект <select value={createProject} onChange={(e) => { setCreateProject(e.target.value); setCreateAssignee(""); setCreateReviewer(""); }}>
         {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
       </select></label>
+      <label>Спринт <select value={createSprint} onChange={(e) => setCreateSprint(e.target.value)}>
+        <option value="">Без спринта</option>{createSprints.map((s) => <option key={s.id} value={s.id}>{s.name} · {s.starts_on} — {s.ends_on}</option>)}
+      </select></label>
       <label>Название <input value={createTitle} onChange={(e) => setCreateTitle(e.target.value)} /></label>
       <label>Описание <textarea value={createDescription} onChange={(e) => setCreateDescription(e.target.value)} /></label>
       <label>Исполнитель <select value={createAssignee} onChange={(e) => {
@@ -364,8 +523,16 @@ export default function TaskBoard({ api, person, projects, view, taskId, navigat
           <div><dt>QA</dt><dd>{selected.qa_reviewer_id ? nameFor(selected.qa_reviewer_id) : "Не назначен"}</dd></div>
           <div><dt>Проверка</dt><dd>{selected.qa_review_passed ? "Пройдена" : selected.qa_review_status || "Не начата"}</dd></div>
           <div><dt>Срок</dt><dd>{selected.current_due_date}</dd></div>
+          <div><dt>Спринт</dt><dd>{sprints.find((s) => s.id === selected.sprint_id)?.name || "Без спринта"}</dd></div>
           {selected.submitted_at && <div><dt>На проверке с</dt><dd>{new Date(selected.submitted_at).toLocaleString()}</dd></div>}
           {selected.completed_at && <div><dt>Принято</dt><dd>{new Date(selected.completed_at).toLocaleString()}</dd></div>}</dl></div>
+      {person.roles.includes("PM") && members.some((member) => member.id === person.id) && selected.status !== "DONE" && selected.status !== "CANCELLED" &&
+        <div className="surface detail-section"><h2>Спринт задачи</h2>
+          <label>Спринт <select value={chosenSprint} onChange={(e) => setChosenSprint(e.target.value)}>
+            <option value="">Без спринта</option>{sprints.map((s) => <option key={s.id} value={s.id}>{s.name} · {s.starts_on} — {s.ends_on}</option>)}
+          </select></label>
+          <button disabled={mutationBusy || chosenSprint === (selected.sprint_id || "")} onClick={() => void saveSprint()}>Сохранить спринт</button>
+        </div>}
       {selected.available_actions.includes("edit") && <div className="form-grid surface">
         <h4>Редактирование</h4>
         <label>Название <input value={title} onChange={(e) => setTitle(e.target.value)} /></label>
@@ -389,10 +556,67 @@ export default function TaskBoard({ api, person, projects, view, taskId, navigat
             <textarea value={note} onChange={(e) => setNote(e.target.value)} /></label>}
         <div className="actions">{selected.available_actions.filter((a) => a in actionLabels).map((a) =>
           <button key={a} disabled={mutationBusy} onClick={() => void act(a)}>{actionLabels[a]}</button>)}</div></div>}
+      <div className="surface detail-section"><h2>Продление срока</h2>
+        {deadlineRequests.length ? <ul>{deadlineRequests.map((item) => <li key={item.id}>
+          {item.proposed_due_date} · {item.status} · {item.reason} · {item.progress_note}
+          {item.decision_reason && <> · {item.decision_reason}</>}
+          {item.status === "PENDING" && (selected.created_by === person.id ||
+            (person.roles.includes("PM") && members.some((member) => member.id === person.id))) && <div>
+            <label>Причина решения <input value={decisionReason} onChange={(e) => setDecisionReason(e.target.value)} /></label>
+            <button disabled={mutationBusy} onClick={() => void decideExtension(item, true)}>Одобрить</button>
+            <button disabled={mutationBusy} onClick={() => void decideExtension(item, false)}>Отклонить</button>
+          </div>}
+        </li>)}</ul> : <p className="muted">Запросов пока нет.</p>}
+        {selected.assignee_id === person.id && !["DONE", "CANCELLED", "REJECTED"].includes(selected.status) &&
+          !deadlineRequests.some((item) => item.status === "PENDING") && <div className="form-grid">
+            <label>Новый срок <input type="date" value={proposedDue} onChange={(e) => setProposedDue(e.target.value)} /></label>
+            <label>Причина <textarea value={extensionReason} onChange={(e) => setExtensionReason(e.target.value)} /></label>
+            <label>Прогресс <textarea value={progressNote} onChange={(e) => setProgressNote(e.target.value)} /></label>
+            <button disabled={mutationBusy || !proposedDue || !extensionReason.trim() || !progressNote.trim()}
+              onClick={() => void requestExtension()}>Запросить продление</button>
+          </div>}
+      </div>
+      <div className="surface detail-section"><h2>Наблюдатели</h2>
+        {watchers.length ? <p>{watchers.map((item) => nameFor(item.user_id)).join(", ")}</p> :
+          <p className="muted">Наблюдателей пока нет.</p>}
+        {members.some((member) => member.id === person.id) && <button disabled={mutationBusy}
+          onClick={() => void changeWatcher(!watchers.some((item) => item.user_id === person.id))}>
+          {watchers.some((item) => item.user_id === person.id) ? "Перестать наблюдать" : "Наблюдать"}</button>}
+      </div>
+      <div className="surface detail-section"><h2>Зависимости</h2>
+        {dependencies.length ? <ul>{dependencies.map((item) => <li key={item.depends_on_task_id}>
+          {dependencyCandidates.find((task) => task.id === item.depends_on_task_id)?.task_key || item.depends_on_task_id}
+        </li>)}</ul> : <p className="muted">Зависимостей пока нет.</p>}
+        {person.roles.includes("PM") && members.some((member) => member.id === person.id) &&
+          !["DONE", "CANCELLED"].includes(selected.status) && <div>
+            <label>Добавить зависимость <select value={dependencyTarget} onChange={(e) => setDependencyTarget(e.target.value)}>
+              <option value="">Выберите задачу</option>
+              {dependencyCandidates.filter((task) => task.id !== selected.id &&
+                !dependencies.some((item) => item.depends_on_task_id === task.id)).map((task) =>
+                <option key={task.id} value={task.id}>{task.task_key} · {task.title}</option>)}</select></label>
+            <button disabled={mutationBusy || !dependencyTarget} onClick={() => void addDependency()}>Добавить</button>
+          </div>}
+      </div>
       <div className="surface detail-section"><h2>Комментарии</h2>
         {comments.length ? <ul>{comments.map((c) => <li key={c.id}>{c.body} · {nameFor(c.author_user_id)} · {new Date(c.created_at).toLocaleString()}</li>)}</ul> : <p className="muted">Комментариев пока нет.</p>}
         <label>Новый комментарий <textarea value={comment} onChange={(e) => setComment(e.target.value)} /></label>
         <button disabled={mutationBusy || !comment.trim()} onClick={() => void addComment()}>Добавить комментарий</button></div>
+      <div className="surface detail-section"><h2>Вложения</h2>
+        {attachments.length ? <ul>{attachments.map((item) => <li key={item.id}>
+          {item.filename} · {Math.ceil(item.size_bytes / 1024)} КБ
+          <button type="button" onClick={() => void getDownloadLink(item)}>Получить ссылку</button>
+          {downloadLinks[item.id] && <a href={downloadLinks[item.id]} target="_blank" rel="noopener noreferrer">Скачать (60 секунд)</a>}
+          {(item.uploader_user_id === person.id || person.roles.includes("SUPER_ADMIN")) &&
+            <button type="button" disabled={mutationBusy} onClick={() => void deleteAttachment(item)}>Удалить</button>}
+        </li>)}</ul> : <p className="muted">Вложений пока нет.</p>}
+        {members.some((member) => member.id === person.id) && <div>
+          <label>Добавить PDF, PNG, JPEG или TXT (до 10 МБ)
+            <input type="file" accept=".pdf,.png,.jpg,.jpeg,.txt" onChange={(event) => {
+              setAttachmentFile(event.target.files?.[0] || null); uploadAttempt.current = null;
+            }} /></label>
+          <button type="button" disabled={mutationBusy || !attachmentFile} onClick={() => void uploadAttachment()}>Загрузить</button>
+        </div>}
+      </div>
       <div className="surface detail-section"><h2>История</h2>
       {events.length ? <ol>{events.map((e) => <li key={e.id}>{new Date(e.occurred_at).toLocaleString()} · {e.type} · {nameFor(e.actor_user_id)}
         {Boolean(e.after_data.reason || e.after_data.comment || e.after_data.result) && <> · {String(e.after_data.reason || e.after_data.comment || e.after_data.result)}</>}

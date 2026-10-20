@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from taskbot_api.models import Project, Task, TaskEvent, User, WeeklyReport, now, utc
+from taskbot_api.models import DeadlineRequest, Project, ProjectMember, Task, TaskEvent, User, WeeklyReport, now, utc
 from taskbot_api.security import role_codes
 from taskbot_api.task_service import is_overdue
 
@@ -34,6 +34,7 @@ def empty_metrics() -> dict:
     return {"created": 0, "completed": 0, "accepted_by_author": 0,
             "admin_approved": 0, "current_overdue": 0,
             "awaiting_review_or_acceptance": 0, "awaiting_assignee_response": 0,
+            "pending_deadline_requests": 0,
             "on_time_current": 0, "on_time_original": 0}
 
 
@@ -48,6 +49,11 @@ async def report_projects(db: AsyncSession, recipient: User) -> list[Project]:
     roles = await role_codes(db, recipient.id)
     if {"SUPER_ADMIN", "TEAM_LEAD"} & roles:
         statement = select(Project).order_by(Project.name, Project.id)
+    elif "PM" in roles:
+        statement = (select(Project).join(ProjectMember,
+                                          ProjectMember.project_id == Project.id)
+                     .where(ProjectMember.user_id == recipient.id)
+                     .order_by(Project.name, Project.id))
     else:
         raise HTTPException(403, "FORBIDDEN")
     return (await db.scalars(statement)).all()
@@ -59,6 +65,10 @@ async def build_weekly_report(db: AsyncSession, recipient: User, *, at: datetime
     projects = await report_projects(db, recipient)
     project_ids = [row.id for row in projects]
     tasks = (await db.scalars(select(Task).where(Task.project_id.in_(project_ids)))).all() if project_ids else []
+    task_by_id = {task.id: task for task in tasks}
+    pending = (await db.scalars(select(DeadlineRequest).where(
+        DeadlineRequest.task_id.in_(task_by_id),
+        DeadlineRequest.status == "PENDING"))).all() if tasks else []
     events = (await db.scalars(select(TaskEvent).where(
         TaskEvent.task_id.in_([t.id for t in tasks]),
         TaskEvent.type.in_(["APPROVE", "ADMIN_APPROVE"])
@@ -66,6 +76,10 @@ async def build_weekly_report(db: AsyncSession, recipient: User, *, at: datetime
     approvals = {event.task_id: event for event in events if begin <= utc(event.occurred_at) < end}
     by_project = {project.id: {"project_id": str(project.id), "name": project.name,
                                **empty_metrics()} for project in projects}
+    for pending_request in pending:
+        pending_task = task_by_id[pending_request.task_id]
+        if pending_task.status not in {"DONE", "CANCELLED"}:
+            by_project[pending_task.project_id]["pending_deadline_requests"] += 1
     for task in tasks:
         metrics = by_project[task.project_id]
         if begin <= utc(task.created_at) < end:
@@ -98,7 +112,7 @@ async def build_weekly_report(db: AsyncSession, recipient: User, *, at: datetime
     return {"week_start": week_start.isoformat(), "week_end_exclusive": end.astimezone(TASHKENT).date().isoformat(),
             "generated_at": instant.isoformat(), "timezone": "Asia/Tashkent",
             "totals": totals, "projects": list(by_project.values()),
-            "deadline_requests_supported": False}
+            "deadline_requests_supported": True}
 
 
 def report_message(payload: dict) -> str:

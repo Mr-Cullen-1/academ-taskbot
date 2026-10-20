@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     workday_start: time = time(10)
     workday_end: time = time(19)
     reaction_work_minutes: int = 240
+    supabase_url: str | None = None
+    supabase_secret_key: SecretStr | None = None
+    attachment_bucket: str | None = None
 
     @model_validator(mode="after")
     def validate_web_security(self):
@@ -73,6 +76,16 @@ class Settings(BaseSettings):
             raise ValueError("invalid working calendar or reaction interval")
         if self.notification_delivery_enabled and self.notification_transport == "telegram" and not self.bot_token:
             raise ValueError("TASKBOT_BOT_TOKEN is required for Telegram delivery")
+        storage_values = (self.supabase_url, self.supabase_secret_key, self.attachment_bucket)
+        if any(storage_values) and not all(storage_values):
+            raise ValueError("Supabase Storage requires URL, secret key and private bucket")
+        if self.supabase_url:
+            parsed = urlsplit(self.supabase_url)
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username or
+                    parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
+                raise ValueError("TASKBOT_SUPABASE_URL must be an HTTPS origin")
+        if self.attachment_bucket and not self.attachment_bucket.replace("-", "").replace("_", "").isalnum():
+            raise ValueError("TASKBOT_ATTACHMENT_BUCKET must contain only letters, numbers, - or _")
         if self.web_origin:
             if not self.web_origin.startswith(("http://", "https://")):
                 raise ValueError("TASKBOT_WEB_ORIGIN must use HTTP or HTTPS")

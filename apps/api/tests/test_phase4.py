@@ -89,7 +89,8 @@ def test_outbox_idempotency_retry_recovery_and_private_api():
                                                at=instant + timedelta(minutes=2, seconds=11)) == 1
             async with factory() as db:
                 row = await db.scalar(select(Notification).where(Notification.task_id == task_id))
-                assert row.state == "SENT" and row.attempts == 3
+                # The abandoned lease is also a real, uncertain send attempt.
+                assert row.state == "SENT" and row.attempts == 4
             async with app.router.lifespan_context(app):
                 transport = httpx.ASGITransport(app=app)
                 async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as worker, \
@@ -437,14 +438,14 @@ def test_report_delivery_scope_and_api():
                 async with db.begin():
                     db.add(UserRole(user_id=users[703], code="TEAM_LEAD"))
             assert await schedule_weekly_reports(factory, at=instant - timedelta(minutes=1)) == 0
-            assert await schedule_weekly_reports(factory, at=instant) == 2
+            assert await schedule_weekly_reports(factory, at=instant) == 3
             assert await schedule_weekly_reports(factory, at=instant + timedelta(minutes=1)) == 0
             async with factory() as db:
                 saved = (await db.scalars(select(WeeklyReport))).all()
-                assert {row.recipient_user_id for row in saved} == {users[701], users[703]}
+                assert {row.recipient_user_id for row in saved} == {users[701], users[702], users[703]}
             fake = FakeTransport()
-            assert await deliver_notifications(factory, fake, settings(), at=instant) == 2
-            assert len(fake.sent) == 2
+            assert await deliver_notifications(factory, fake, settings(), at=instant) == 3
+            assert len(fake.sent) == 3
             async with app.router.lifespan_context(app):
                 transport = httpx.ASGITransport(app=app)
                 async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as admin, \
@@ -460,7 +461,9 @@ def test_report_delivery_scope_and_api():
                         assert lead_report.status_code == 200
                         assert len(lead_report.json()["projects"]) == 2
                         assert str(project) in {row["project_id"] for row in lead_report.json()["projects"]}
-                        assert (await pm.get("/api/v1/reports/weekly", params=params)).status_code == 403
+                        pm_report = await pm.get("/api/v1/reports/weekly", params=params)
+                        assert pm_report.status_code == 200
+                        assert {row["project_id"] for row in pm_report.json()["projects"]} == {str(project)}
         finally:
             await engine.dispose()
     asyncio.run(scenario())
@@ -474,13 +477,13 @@ def test_weekly_report_remains_available_after_team_lead_loses_membership():
             async with factory() as db:
                 async with db.begin():
                     db.add(UserRole(user_id=users[703], code="TEAM_LEAD"))
-            assert await schedule_weekly_reports(factory, at=instant) == 2
+            assert await schedule_weekly_reports(factory, at=instant) == 3
             async with factory() as db:
                 async with db.begin():
                     await db.delete(await db.get(ProjectMember, (project, users[703])))
             fake = FakeTransport()
-            assert await deliver_notifications(factory, fake, settings(), at=instant) == 2
-            assert {chat_id for chat_id, _, _ in fake.sent} == {701, 703}
+            assert await deliver_notifications(factory, fake, settings(), at=instant) == 3
+            assert {chat_id for chat_id, _, _ in fake.sent} == {701, 702, 703}
             async with factory() as db:
                 delivered = await db.scalar(select(Notification).where(
                     Notification.recipient_user_id == users[703],

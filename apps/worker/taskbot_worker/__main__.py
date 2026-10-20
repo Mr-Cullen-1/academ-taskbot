@@ -25,12 +25,15 @@ async def worker_tick(factory, settings: Settings, transport: MessageTransport,
                       *, at=None) -> dict:
     instant = at or now()
     counts = {
-        "outbox": await process_outbox(factory, limit=settings.worker_batch_size, at=instant),
+        "outbox": await process_outbox(factory, limit=settings.worker_batch_size, at=instant,
+                                        max_attempts=settings.worker_max_attempts,
+                                        retry_base_seconds=settings.worker_retry_base_seconds),
         "deadlines": await schedule_deadlines(factory, at=instant),
         "reaction": await schedule_reaction_reminders(factory, settings, at=instant),
         "reports": await schedule_weekly_reports(factory, at=instant),
     }
-    counts["delivery"] = await deliver_notifications(factory, transport, settings, at=instant)
+    counts["delivery"] = await deliver_notifications(
+        factory, transport, settings, at=instant if at is not None else None)
     return counts
 
 

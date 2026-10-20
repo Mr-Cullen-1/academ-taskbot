@@ -11,6 +11,12 @@ from taskbot_api.db import build_engine, database_is_ready, session_factory
 from taskbot_api.routes import dev_router, router
 from taskbot_api.task_routes import router as task_router
 from taskbot_api.notification_routes import router as notification_router
+from taskbot_api.reminder_routes import router as reminder_router
+from taskbot_api.task_links_routes import router as task_links_router
+from taskbot_api.deadline_routes import router as deadline_router
+from taskbot_api.planning_routes import router as planning_router
+from taskbot_api.analytics_routes import router as analytics_router
+from taskbot_api.attachment_routes import router as attachment_router
 
 
 class HealthResponse(BaseModel):
@@ -47,8 +53,14 @@ def create_app(settings: Settings | None = None, *, engine_override: AsyncEngine
     application.include_router(router)
     if config.dev_login_enabled:
         application.include_router(dev_router)
+    application.include_router(task_links_router)
+    application.include_router(deadline_router)
+    application.include_router(planning_router)
+    application.include_router(analytics_router)
+    application.include_router(attachment_router)
     application.include_router(task_router)
     application.include_router(notification_router)
+    application.include_router(reminder_router)
 
     @application.get("/api/v1/health", response_model=HealthResponse)
     async def health() -> HealthResponse:

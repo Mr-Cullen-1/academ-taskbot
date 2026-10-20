@@ -10,8 +10,11 @@ import DashboardCharts from "./DashboardCharts";
 import { attentionDeadline, dashboardTasks, deadlineCounts, type TaskSummary } from "./taskAnalytics";
 import { pages } from "./apiPages";
 import Profile from "./Profile";
+import { NotificationsPanel, ReportsPanel } from "./MvpPanels";
+import PlanningPanel from "./PlanningPanel";
 
-type Person = { id: string; name: string; phone?: string; status: string; roles: string[]; version: number };
+type Person = { id: string; name: string; phone?: string; status: string; roles: string[]; version: number;
+  requested_role?: string; requested_project_id?: string | null; requested_project_name?: string | null };
 type Project = { id: string; name: string; description: string; owner_user_id: string; version: number };
 declare global {
   interface Window {
@@ -28,7 +31,7 @@ const devLoginEnabled = process.env.NODE_ENV !== "production" &&
 // The guarded local dev login requires a direct loopback request; Mini App traffic uses the proxy.
 const devApi = devLoginEnabled ? process.env.NEXT_PUBLIC_TASKBOT_API_URL || "" : "";
 const roles = ["PM", "TEAM_LEAD", "SUBJECT_DEVELOPER", "QA"];
-type RouteView = "home" | "projects" | "project-new" | "project-detail" | "tasks" | "task-new" | "task-detail" | "team" | "reviews" | "profile";
+type RouteView = "home" | "projects" | "project-new" | "project-detail" | "tasks" | "task-new" | "task-detail" | "team" | "reviews" | "profile" | "notifications" | "reports";
 const RouteContext = createContext<((view: RouteView, id?: string) => ReactNode) | null>(null);
 
 export function TaskbotRoute({ view }: { view: RouteView }) {
@@ -61,7 +64,8 @@ export default function TaskbotApp({ children }: { children: ReactNode }) {
   const projectAttempt = useRef<{ payload: string; key: string } | null>(null);
   const initialized = useRef(false);
   const nested = pathname !== "/" && pathname !== "/projects" && pathname !== "/tasks" &&
-    pathname !== "/team" && pathname !== "/reviews" && pathname !== "/profile";
+    pathname !== "/team" && pathname !== "/reviews" && pathname !== "/profile" &&
+    pathname !== "/notifications" && pathname !== "/reports";
 
   useEffect(() => {
     const webApp = window.Telegram?.WebApp;
@@ -159,7 +163,8 @@ export default function TaskbotApp({ children }: { children: ReactNode }) {
       const response = await fetch(`${api}/api/v1/users/${candidate.id}/status`, {
         method: "PATCH", credentials: "include",
         headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf, "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({ status, expected_version: candidate.version, ...(status === "ACTIVE" ? { roles: chosenRoles } : {}) }),
+        body: JSON.stringify({ status, expected_version: candidate.version,
+          ...(status === "ACTIVE" ? { roles: chosenRoles, project_id: candidate.requested_project_id ?? null } : {}) }),
       });
       if (!response.ok) { setMessage("Не удалось обработать заявку. Обновите страницу и проверьте права."); return; }
       await load();
@@ -277,6 +282,7 @@ export default function TaskbotApp({ children }: { children: ReactNode }) {
         </form>
       </section> : <div className="empty-state surface"><h1>Доступ запрещён</h1><p>Создание проекта недоступно вашей роли.</p></div>;
       case "project-detail": return id ? <ProjectDetail key={id} api={api} projectId={id} canManage={person.roles.includes("SUPER_ADMIN")}
+        canPlan={person.roles.includes("SUPER_ADMIN") || person.roles.includes("PM")} personId={person.id}
         onUpdated={(updated) => setProjects((current) => current.map((project) => project.id === updated.id ? updated : project))} /> : null;
       case "tasks":
       case "task-new":
@@ -294,6 +300,10 @@ export default function TaskbotApp({ children }: { children: ReactNode }) {
       case "reviews": return <Reviews api={api} person={person} projects={projects} />;
       case "profile": return <Profile api={api} person={person} onChanged={setPerson}
         logout={logout} logoutBusy={logoutBusy} />;
+      case "notifications": return <NotificationsPanel api={api} />;
+      case "reports": return person.roles.some((role) => ["SUPER_ADMIN", "TEAM_LEAD", "PM"].includes(role)) ?
+        <ReportsPanel api={api} projects={projects} roles={person.roles} /> :
+        <div className="empty-state surface"><h1>Отчёты недоступны</h1></div>;
     }
   }
 
@@ -392,6 +402,9 @@ function Dashboard({ api, person, projects, pendingCount }: { api: string; perso
     <div className="section-heading compact"><h2>Быстрые действия</h2></div>
     <div className="quick-actions"><Link className="quick-action surface" href="/tasks/new"><Icon name="plus" /><span>Новая задача</span></Link>
       <Link className="quick-action surface" href="/projects"><Icon name="folder" /><span>Проекты · {projects.length}</span></Link>
+      <Link className="quick-action surface" href="/notifications"><Icon name="check" /><span>Уведомления</span></Link>
+      {person.roles.some((role) => ["SUPER_ADMIN", "TEAM_LEAD", "PM"].includes(role)) &&
+        <Link className="quick-action surface" href="/reports"><Icon name="grid" /><span>Отчёты</span></Link>}
       {(person.roles.includes("SUPER_ADMIN") || person.roles.includes("PM")) && <Link className="quick-action surface" href="/projects/new"><Icon name="plus" /><span>Новый проект</span></Link>}
       {person.roles.includes("QA") && <Link className="quick-action surface" href="/reviews"><Icon name="shield" /><span>Мои проверки</span></Link>}
       {person.roles.includes("SUPER_ADMIN") && pendingCount > 0 && <Link className="quick-action surface" href="/team"><Icon name="users" /><span>Заявки · {pendingCount}</span></Link>}</div>
@@ -402,8 +415,8 @@ function Dashboard({ api, person, projects, pendingCount }: { api: string; perso
   </section>;
 }
 
-function ProjectDetail({ api, projectId, canManage, onUpdated }: {
-  api: string; projectId: string; canManage: boolean; onUpdated: (project: Project) => void;
+function ProjectDetail({ api, projectId, canManage, canPlan, personId, onUpdated }: {
+  api: string; projectId: string; canManage: boolean; canPlan: boolean; personId: string; onUpdated: (project: Project) => void;
 }) {
   const [project, setProject] = useState<Project | null>(null);
   const [members, setMembers] = useState<Person[]>([]);
@@ -439,6 +452,7 @@ function ProjectDetail({ api, projectId, canManage, onUpdated }: {
         <span className="avatar">{member.name.slice(0, 1).toUpperCase()}</span><span><strong>{member.name}</strong><small>{member.roles.join(" · ")}</small></span></li>)}</ul> : <p className="muted">Участников нет.</p>}
       {canManage && editingMembers && <ProjectMembership api={api} project={project} onClose={() => setEditingMembers(false)}
         onUpdated={(updated) => { setProject(updated); onUpdated(updated); setRefresh((current) => current + 1); }} />}
+      <PlanningPanel api={api} projectId={projectId} canManage={canPlan && (canManage || members.some((member) => member.id === personId))} members={members} />
     </>}
   </section>;
 }
@@ -496,9 +510,11 @@ function Reviews({ api, person, projects }: { api: string; person: Person; proje
 }
 
 function Pending({ person, decide, busy }: { person: Person; decide: (person: Person, status: "ACTIVE" | "REJECTED", roles: string[]) => Promise<void>; busy: boolean }) {
-  const [chosen, setChosen] = useState(["SUBJECT_DEVELOPER"]);
+  const [chosen, setChosen] = useState([person.requested_role || "SUBJECT_DEVELOPER"]);
   return <div className="application">
     <strong>{person.name}</strong>{person.phone && <span> · {person.phone}</span>}
+    {person.requested_role && <p>Запрошена роль: {person.requested_role}.
+      Проект: {person.requested_project_name || "не указан"}.</p>}
     <fieldset><legend>Роли</legend>{roles.map((value) => <label key={value}>
       <input type="checkbox" checked={chosen.includes(value)} disabled={busy}
         onChange={(event) => setChosen((current) => event.target.checked ? [...current, value] : current.filter((role) => role !== value))} />{value}

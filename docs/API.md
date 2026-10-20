@@ -40,11 +40,12 @@
 | GET /projects/{id} | — → project, разрешённые участники | Член, Super Admin или Team Lead для чтения |
 | PATCH /projects/{id} | {name?,description?,status?,expected_version} → project | Super Admin; право PM на изменение метаданных требует OQ-02; допустимые статусы — OQ-06 |
 | PUT /projects/{id}/members | {members:[user_id],expected_version} → состав | Super Admin; право PM на изменение состава требует OQ-02; полная замена, нельзя неявно оставить задачу с неразрешённым assignee |
-| GET /projects/{id}/sprints | status, cursor → sprints | Член, Super Admin или Team Lead для чтения |
-| POST /projects/{id}/sprints | {name,starts_at,ends_at,status?} → sprint | Super Admin либо PM с членством в проекте |
-| PATCH /sprints/{id} | {name?,starts_at?,ends_at?,status?,expected_version} → sprint | Super Admin либо PM с членством в проекте; project_id неизменяем |
+| GET /projects/{id}/sprints | — → sprints | Член, Super Admin или Team Lead для чтения |
+| POST /projects/{id}/sprints | {name,starts_on,ends_on} → sprint | Super Admin либо PM с членством в проекте; календарные даты YYYY-MM-DD |
+| PATCH /sprints/{id} | {name?,starts_on?,ends_on?,expected_version} → sprint | Super Admin либо PM с членством в проекте; project_id неизменяем |
+| PUT /tasks/{id}/sprint | {sprint_id?,expected_version} → task | Super Admin либо PM с членством; только спринт того же проекта |
 
-Статусы проектов и спринтов, их допустимые изменения и точность дат требуют решения OQ-06.
+Статусы и архивирование проектов требуют OQ-06. У спринта нет статуса; даты — календарные даты Asia/Tashkent.
 Для согласованных команд проекта необходимы GET/POST /projects/{id}/teams и PUT /teams/{id}/members: просмотр, создание и замена состава команды. Доступ к просмотру у участников проекта, изменение у уполномоченного PM/Super Admin; состав команды должен быть подмножеством project_members. Эти операции добавлены потому, что команды прямо входят в предметную область, хотя исходный список API был предварительным.
 
 Полномочия определяются одной или несколькими из пяти фиксированных ролей, статусом Active, членством в проекте и отношением к задаче как created_by/assignee_id. Индивидуальные grants, ACL и произвольные поля разрешений в API отсутствуют. Роль PM даёт создание проекта, но управление или чтение существующего проекта по-прежнему требует членства; роль Team Lead даёт чтение всех проектов и задач и создание задач в любом существующем проекте без членства, но не административные права Super Admin. Пределы отдельных проектных действий, не заданные владельцем, описаны в [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md).
@@ -73,27 +74,28 @@ QA-проверка использует те же expected_version, Idempotency
 | POST /tasks/{id}/qa-review/done | REVIEW → REVIEW; qa_review_status: PENDING → DONE | expected_version | Только назначенный qa_reviewer_id с ролью QA и доступом к проекту; не устанавливает completed_at и не заменяет approve |
 | POST /tasks/{id}/cancel | OPEN, ACCEPTED, REJECTED, IN_PROGRESS, BLOCKED, REVIEW, REWORK → CANCELLED | reason, expected_version | created_by или PM с членством в проекте |
 
-Ни один переход не выполняется PATCH статуса. После каждого повторного submit-review текущий qa_review_status назначенного QA сбрасывается в PENDING, а предшествующий результат остаётся в task_events; request-rework от QA устанавливает qa_review_status=REWORK. Обычный approve не требует причины вмешательства и доступен только created_by, в том числе при ещё не завершённой QA-проверке. admin-approve — отдельное действие: backend проверяет REVIEW, единственную роль Super Admin, author_unavailable_confirmed=true и непустую reason; отсутствие любого условия отклоняет операцию без изменения задачи. Отсутствие активности или ответа автора само по себе не разрешает исключение. При успехе tasks.created_by неизменен, completed_at фиксирует DONE тем же транзакционным моментом, что и occurred_at события; task_event получает approval_mode=ADMIN_OVERRIDE, фактический actor_user_id, original_author_user_id, author_unavailable_confirmed=true и intervention_reason; связанный audit_log сохраняет те же сведения. Обычное действие пишет approval_mode=AUTHOR и фактического автора. Оба пути создают предусмотренное событием DONE уведомление исполнителю, а не дублируют его. Успех возвращает задачу с новым version и событие в истории. Запрещённый переход — INVALID_STATUS_TRANSITION; неисполненное условие исключения — FORBIDDEN или VALIDATION_ERROR по причине отказа без раскрытия лишних данных. Правило зависимостей для start/submit-review/approve/admin-approve пока OQ-07.
+Ни один переход не выполняется PATCH статуса. После каждого повторного submit-review текущий qa_review_status назначенного QA сбрасывается в PENDING, а предшествующий результат остаётся в task_events; request-rework от QA устанавливает qa_review_status=REWORK. Обычный approve не требует причины вмешательства и доступен только created_by, в том числе при ещё не завершённой QA-проверке. admin-approve — отдельное действие: backend проверяет REVIEW, единственную роль Super Admin, author_unavailable_confirmed=true и непустую reason; отсутствие любого условия отклоняет операцию без изменения задачи. Отсутствие активности или ответа автора само по себе не разрешает исключение. При успехе tasks.created_by неизменен, completed_at фиксирует DONE тем же транзакционным моментом, что и occurred_at события; task_event получает approval_mode=ADMIN_OVERRIDE, фактический actor_user_id, original_author_user_id, author_unavailable_confirmed=true и intervention_reason; связанный audit_log сохраняет те же сведения. Обычное действие пишет approval_mode=AUTHOR и фактического автора. Оба пути создают предусмотренное событием DONE уведомление исполнителю, а не дублируют его. Успех возвращает задачу с новым version и событие в истории. Запрещённый переход — INVALID_STATUS_TRANSITION; неисполненное условие исключения — FORBIDDEN или VALIDATION_ERROR по причине отказа без раскрытия лишних данных. Зависимости внутри проекта не блокируют эти переходы.
 
 ## Дедлайны, обсуждение, связи
 
 | Операция | Минимальный запрос → ответ | Доступ |
 | --- | --- | --- |
-| POST /tasks/{id}/deadline-requests | {proposed_due_date,reason,progress_note,expected_version} → request Pending | Текущий assignee; все три содержательных поля обязательны |
+| POST /tasks/{id}/deadline-requests | {proposed_due_date,reason,progress_note,expected_version} → request Pending | Текущий assignee; все три содержательных поля обязательны; не более одного Pending запроса на задачу |
 | POST /deadline-requests/{id}/approve | {expected_version} → request Approved и task.current_due_date | created_by или уполномоченный PM; создаёт deadline_change, event, outbox атомарно |
 | POST /deadline-requests/{id}/reject | {reason?,expected_version} → request Rejected | created_by или уполномоченный PM; старый срок остаётся |
 | POST /tasks/{id}/comments | {body} → comment | Участник с правом комментировать |
 | GET /tasks/{id}/comments | cursor → comments | Читатель задачи, с учётом видимости комментариев |
 | POST /tasks/{id}/watchers | {user_id} → watcher | Участник проекта добавляет только себя; добавление других наблюдателей требует отдельного решения, пользователь должен быть Active участником проекта |
-| GET /tasks/{id}/watchers | cursor → watchers | Читатель задачи |
-| DELETE /tasks/{id}/watchers/{userId} | — → 204 | Участник проекта удаляет только себя; снятие другого наблюдателя требует отдельного решения |
+| GET /tasks/{id}/watchers | — → watchers | Читатель задачи |
+| DELETE /tasks/{id}/watchers/{userId} | `Idempotency-Key` → {removed:true} | Участник проекта удаляет только себя; снятие другого наблюдателя требует отдельного решения |
 | POST /tasks/{id}/dependencies | {depends_on_task_id} → dependency | Право редактирования задачи; проверка self/cycle на backend |
 | GET /tasks/{id}/events | cursor → упорядоченная история | Участник проекта или Super Admin; чувствительные значения доступны только в утверждённом объёме |
-| POST /tasks/{id}/attachments | Метаданные файла или запрос на приватную загрузку → attachment/upload instruction | Необходим для согласованных вложений; точный поток OQ-12 |
-| GET /tasks/{id}/attachments | cursor → метаданные вложений | Читатель задачи |
+| POST /tasks/{id}/attachments?filename=… | Тело — файл PDF/PNG/JPEG/TXT до 10 МБ, `Content-Type`, `Idempotency-Key` → метаданные | Active участник проекта; сервер загружает в приватный Supabase Storage |
+| GET /tasks/{id}/attachments | — → метаданные вложений | Читатель задачи |
 | GET /tasks/{id}/attachments/{attachmentId}/download | — → краткоживущая приватная ссылка | Только авторизованный читатель вложения |
+| DELETE /tasks/{id}/attachments/{attachmentId} | `Idempotency-Key` → {deleted:true} | Только автор вложения или Super Admin, с аудитом |
 
-Удаление зависимости и вложения, если разрешено продуктом, должно иметь отдельный контракт после OQ-07/OQ-12; это не предполагается автоматически.
+Зависимости разрешены только внутри проекта, без циклов и без блокировки переходов. Удаление зависимости не входит в текущий контракт.
 
 ## Уведомления, напоминания, аналитика и аудит
 
@@ -101,18 +103,18 @@ QA-проверка использует те же expected_version, Idempotency
 | --- | --- | --- |
 | GET /notifications | state, cursor → мои уведомления | Только получатель |
 | POST /notifications/{id}/read | — → 200/204 | Только получатель, повтор безопасен |
-| GET /reminders | cursor → личные напоминания | Только владелец Active, независимо от одной из пяти ролей |
+| GET /reminders | limit → личные напоминания | Только владелец Active, независимо от одной из пяти ролей |
 | POST /reminders | {task_id?,remind_at,text?} → reminder | Только владелец Active; task_id, если есть, должен быть ему доступен |
 | PATCH /reminders/{id} | {remind_at?,text?,expected_version} → reminder | Только владелец Active |
-| DELETE /reminders/{id} | — → 204 | Только владелец Active |
-| GET /reports/weekly | week_start? → сохранённый отчёт за предыдущую календарную неделю; 404 до генерации worker | Active Super Admin: все проекты; Active Team Lead: все проекты. PM без одной из этих ролей не имеет доступа. В Phase 4 сравнение недель и project_id-фильтр не реализованы |
+| DELETE /reminders/{id} | {expected_version} → {cancelled:true} | Только владелец Active |
+| GET /reports/weekly | week_start? → сохранённый отчёт за предыдущую календарную неделю; 404 до генерации worker | Active Super Admin/Team Lead: все проекты; Active PM: доступные проекты |
 | GET /reports/tasks | period/project/assignee/status → агрегаты | PM своего проекта или Super Admin |
 | GET /reports/users | period/project → рабочие показатели без рейтинга | PM своего проекта или Super Admin |
 | GET /audit-logs | actor/action/time/cursor → записи доступа/администрирования | Только Super Admin; расширение доступа не предполагается |
 
 Для notifications получатель берётся из сохранённой записи, а не из параметра клиента; чужие уведомления не возвращаются списком и не помечаются прочитанными по известному UUID. Для reminders owner_user_id устанавливается по текущей сессии и не принимается из тела запроса; чтение, изменение и удаление чужого напоминания запрещены.
 
-В Phase 4 реализовано только чтение собственных notifications и недельного отчёта. Endpoint-ы отметки прочтения, личных reminders и остальные аналитические отчёты остаются будущей работой. Уведомление о назначении содержит две кнопки Telegram; отказ завершается только после ввода причины, переход проверяет текущего исполнителя, статус OPEN и проектный доступ, повтор update_id дедуплицируется.
+Отметка прочтения уведомлений, личные reminders, отчёты задач и пользователей реализованы отдельными API. Уведомление о назначении содержит две кнопки Telegram; отказ завершается только после ввода причины, переход проверяет текущего исполнителя, статус OPEN и проектный доступ, повтор update_id дедуплицируется.
 
 Определения метрик едины для всех поверхностей и зафиксированы в [BUSINESS_RULES.md](BUSINESS_RULES.md). Показатель принятых автором берёт только task_event с approval_mode=AUTHOR; завершённые DONE и доля соблюдения срока включают также утверждённую исключительную приёмку Super Admin, различимую по approval_mode=ADMIN_OVERRIDE. Отчёт не содержит лидерборд.
 

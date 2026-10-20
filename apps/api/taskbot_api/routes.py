@@ -17,9 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from taskbot_api.models import (
     ApiIdempotency, AuditLog, LoginChallenge, LoginProof, Project, ProjectMember,
-    Task, User, UserAvatar, UserRole, WebSession, now, utc,
+    ProjectTeam, ProjectTeamMember, Task, TaskWatcher, User, UserAvatar, UserRole, WebSession, now, utc,
 )
 from taskbot_api.avatar import normalize_avatar
+from taskbot_api.registration import REQUESTABLE_ROLES, decide_pending_user, requested_access
 from taskbot_api.security import (
     AuthenticatedUser, CHALLENGE_COOKIE, COOKIE_NAME, CurrentUser, Db, TelegramProof, digest,
     new_session, new_token, require_super_admin, role_codes, verify_telegram_proof,
@@ -30,7 +31,7 @@ from datetime import timedelta
 
 router = APIRouter(prefix="/api/v1")
 dev_router = APIRouter(prefix="/api/v1", include_in_schema=False)
-NON_ADMIN_ROLES = {"PM", "TEAM_LEAD", "SUBJECT_DEVELOPER", "QA"}
+NON_ADMIN_ROLES = REQUESTABLE_ROLES
 
 
 class DevLoginProof(BaseModel):
@@ -350,7 +351,17 @@ async def users(db: Db, user: CurrentUser, status: str | None = None,
             raise HTTPException(422, "INVALID_STATUS")
         stmt = stmt.where(User.status == status)
     rows = (await db.scalars(stmt)).all()
-    return [user_data(row, await role_codes(db, row.id), private=True) for row in rows]
+    result = []
+    for row in rows:
+        item = user_data(row, await role_codes(db, row.id), private=True)
+        if row.status == "PENDING":
+            request = await requested_access(db, row.id)
+            if request:
+                item.update(requested_role=request.get("role"),
+                            requested_project_id=request.get("project_id"),
+                            requested_project_name=request.get("project_name"))
+        result.append(item)
+    return result
 
 
 @router.get("/users/pending")
@@ -362,6 +373,7 @@ class StatusChange(BaseModel):
     status: str
     expected_version: int = Field(ge=1)
     roles: list[str] | None = None
+    project_id: UUID | None = None
     reason: str | None = Field(default=None, max_length=500)
 
 
@@ -383,14 +395,14 @@ async def change_status(user_id: UUID, body: StatusChange, request: Request,
         roles = await role_codes(db, target.id)
         if "SUPER_ADMIN" in roles and body.status != "ACTIVE":
             raise HTTPException(409, "SOLE_SUPER_ADMIN")
-        if target.status == "PENDING" and body.status == "ACTIVE":
-            chosen = set(body.roles or [])
-            if not chosen or chosen - NON_ADMIN_ROLES:
-                raise HTTPException(422, "ACTIVE_ROLES_REQUIRED")
-            for code in chosen:
-                db.add(UserRole(user_id=target.id, code=code, granted_by=actor.id))
-            roles = chosen
-        elif body.roles is not None:
+        if target.status == "PENDING":
+            roles = await decide_pending_user(
+                db, actor, target, status=body.status,
+                roles=set(body.roles) if body.roles is not None else None,
+                project_id=body.project_id, reason=body.reason,
+            )
+            return 200, user_data(target, roles, private=True)
+        if body.roles is not None or body.project_id is not None:
             raise HTTPException(422, "ROLES_ONLY_ON_APPROVAL")
         previous = target.status
         target.status, target.version, target.updated_at = body.status, target.version + 1, now()
@@ -537,6 +549,12 @@ async def change_members(project_id: UUID, body: MembersChange, request: Request
             ).limit(1))
             if dependent is not None:
                 raise HTTPException(409, "MEMBER_HAS_ACTIVE_TASK")
+            team_ids = select(ProjectTeam.id).where(ProjectTeam.project_id == project_id)
+            await db.execute(delete(ProjectTeamMember).where(
+                ProjectTeamMember.team_id.in_(team_ids), ProjectTeamMember.user_id.in_(removed)))
+            task_ids = select(Task.id).where(Task.project_id == project_id)
+            await db.execute(delete(TaskWatcher).where(
+                TaskWatcher.task_id.in_(task_ids), TaskWatcher.user_id.in_(removed)))
         await db.execute(delete(ProjectMember).where(ProjectMember.project_id == project_id,
                                                     ProjectMember.user_id.in_(removed)))
         for member_id in members - before:

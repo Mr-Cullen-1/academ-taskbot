@@ -5,13 +5,19 @@ import asyncio
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import CommandStart
-from aiogram.types import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
-                           Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, WebAppInfo)
+from aiogram.fsm.context import FSMContext
+from aiogram.types import (InlineKeyboardButton, InlineKeyboardMarkup,
+                           KeyboardButton, MenuButtonWebApp, Message,
+                           ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, WebAppInfo)
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from taskbot_api.config import get_settings
 from taskbot_api.db import build_engine, session_factory
 from taskbot_api.registration import RegistrationEvent, process_registration
+from taskbot_api.models import User
+from taskbot_bot.menu import active_keyboard, build_menu_router
+from taskbot_bot.onboarding import build_onboarding_router, pending_prompt
 from taskbot_bot.tasks import build_task_router
 
 
@@ -47,18 +53,27 @@ async def handle_registration(message: Message, event_update: Update,
         "START_REQUIRED": ("Сначала отправьте /start.", ReplyKeyboardRemove()),
     }
     text, markup = replies.get(result.code, ("Отправьте /start, чтобы начать регистрацию.", ReplyKeyboardRemove()))
-    if result.code == "ACCOUNT_ACTIVE" and webapp_url:
-        markup = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Открыть задачи", web_app=WebAppInfo(url=webapp_url))
-        ]])
+    if result.code == "ACCOUNT_PENDING":
+        async with registration_factory() as db:
+            user = await db.scalar(select(User).where(User.telegram_user_id == message.from_user.id))
+            if user is not None:
+                text, markup = await pending_prompt(db, user)
     elif result.code == "ACCOUNT_ACTIVE":
-        text = "Ваш аккаунт активен. Ссылка Mini App ещё не настроена администратором."
+        markup = active_keyboard(webapp_url)
+        if not webapp_url:
+            text += " Ссылка Mini App ещё не настроена администратором."
     await message.answer(text, reply_markup=markup)
+    if result.code == "ACCOUNT_ACTIVE" and webapp_url:
+        await message.answer("Откройте задачи в Mini App:", reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(
+                text="Открыть задачи", web_app=WebAppInfo(url=webapp_url))]]))
 
 
 async def start(message: Message, event_update: Update,
                 registration_factory: async_sessionmaker[AsyncSession],
+                state: FSMContext,
                 webapp_url: str | None = None) -> None:
+    await state.clear()
     await handle_registration(message, event_update, registration_factory, "START", webapp_url)
 
 
@@ -82,6 +97,8 @@ def build_dispatcher() -> Dispatcher:
     name_router.message.register(name, lambda message: bool(message.text) and not message.text.startswith("/"))
     dispatcher = Dispatcher()
     dispatcher.include_router(registration_router)
+    dispatcher.include_router(build_onboarding_router())
+    dispatcher.include_router(build_menu_router())
     dispatcher.include_router(build_task_router())
     dispatcher.include_router(name_router)
     return dispatcher
@@ -97,11 +114,19 @@ async def run_polling() -> None:
         raise SystemExit("TASKBOT_DATABASE_URL is required to start polling")
     try:
         async with Bot(token=token.get_secret_value()) as bot:
+            if settings.webapp_url:
+                await configure_menu_button(bot, settings.webapp_url)
             await build_dispatcher().start_polling(bot, registration_factory=session_factory(engine),
                                                    webapp_url=settings.webapp_url,
                                                    allowed_updates=["message", "callback_query"])
     finally:
         await engine.dispose()
+
+
+async def configure_menu_button(bot: Bot, webapp_url: str) -> bool:
+    """Use the same configured HTTPS Mini App URL as the /start keyboard."""
+    return await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(
+        text="Открыть задачи", web_app=WebAppInfo(url=webapp_url)))
 
 
 def main() -> None:

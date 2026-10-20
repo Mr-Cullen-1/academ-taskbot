@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from taskbot_api.models import (
-    OutboxEvent, Project, ProjectMember, Task, TaskComment, TaskEvent, TaskKeySequence,
+    OutboxEvent, Project, ProjectMember, Sprint, Task, TaskComment, TaskEvent, TaskKeySequence,
     User, now, utc,
 )
 from taskbot_api.routes import audit, can_view_project
@@ -34,6 +34,7 @@ def as_json(task: Task) -> dict:
               .astimezone(timezone.utc).isoformat()) if task.current_due_date else None
     return {
         "id": str(task.id), "task_key": task.task_key, "project_id": str(task.project_id),
+        "sprint_id": str(task.sprint_id) if task.sprint_id else None,
         "title": task.title, "description": task.description,
         "created_by": str(task.created_by),
         "assignee_id": str(task.assignee_id) if task.assignee_id else None,
@@ -112,11 +113,16 @@ async def add_event(db: AsyncSession, task: Task, actor: User, event_type: str,
 async def create_task(db: AsyncSession, actor: User, *, project_id: UUID,
                       title: str, description: str, assignee_id: UUID | None,
                       qa_reviewer_id: UUID | None, priority: str, type: str,
-                      due_date: date, request_id: str | None = None) -> Task:
+                      due_date: date, sprint_id: UUID | None = None,
+                      request_id: str | None = None) -> Task:
     if due_date is None:
         raise HTTPException(422, "DUE_DATE_REQUIRED")
     if await db.get(Project, project_id) is None or not await can_view_project(db, actor, project_id):
         raise HTTPException(404, "NOT_FOUND")
+    if sprint_id:
+        sprint = await db.get(Sprint, sprint_id)
+        if sprint is None or sprint.project_id != project_id:
+            raise HTTPException(422, "SPRINT_MUST_SHARE_PROJECT")
     if assignee_id:
         await eligible_member(db, project_id, assignee_id)
     if qa_reviewer_id:
@@ -131,7 +137,8 @@ async def create_task(db: AsyncSession, actor: User, *, project_id: UUID,
     task_key = f"TASK-{sequence.next_number}"
     sequence.next_number += 1
     stamp = now()
-    task = Task(task_key=task_key, project_id=project_id, title=title.strip(),
+    task = Task(task_key=task_key, project_id=project_id, sprint_id=sprint_id,
+                title=title.strip(),
                 description=description, created_by=actor.id, assignee_id=assignee_id,
                 qa_reviewer_id=qa_reviewer_id,
                 qa_review_status="PENDING" if qa_reviewer_id else None,
@@ -311,7 +318,11 @@ async def add_comment(db: AsyncSession, actor: User, task: Task, body: str,
     await db.flush()
     task.version += 1
     task.updated_at = stamp
-    await add_event(db, task, actor, "COMMENTED", {}, {"comment_id": str(comment.id)}, request_id, occurred_at=stamp)
+    await add_event(db, task, actor, "COMMENTED", {},
+                    {"comment_id": str(comment.id), "created_by": str(task.created_by),
+                     "assignee_id": str(task.assignee_id) if task.assignee_id else None,
+                     "qa_reviewer_id": str(task.qa_reviewer_id) if task.qa_reviewer_id else None},
+                    request_id, occurred_at=stamp)
     return comment
 
 

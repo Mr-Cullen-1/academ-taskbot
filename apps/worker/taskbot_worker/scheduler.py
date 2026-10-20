@@ -1,9 +1,11 @@
 """Idempotent calendar jobs backed by notification rows."""
 
 from datetime import datetime, time, timedelta, timezone
+from uuid import uuid4
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from taskbot_api.models import Notification, ProjectMember, Task, User, UserRole, WeeklyReport, now, utc
@@ -50,7 +52,7 @@ async def schedule_deadlines(factory: async_sessionmaker[AsyncSession], *,
                 # A prior date remains in the log, but no queued stale reminder may be sent.
                 criteria = [Notification.task_id == task.id,
                             Notification.kind.in_(["DUE_24H", "DUE_2H", "OVERDUE"]),
-                            Notification.state.in_(["PENDING", "RETRY", "SENDING"])]
+                            Notification.state.in_(["PENDING", "RETRY"])]
                 if task.status in OVERDUE_STATUSES:
                     criteria.append(Notification.due_date_snapshot != task.current_due_date)
                 stale = (await db.scalars(select(Notification).where(*criteria))).all()
@@ -97,8 +99,8 @@ async def schedule_reaction_reminders(factory: async_sessionmaker[AsyncSession],
     queued = 0
     async with factory() as db:
         async with db.begin():
-            tasks = (await db.scalars(select(Task).where(Task.status == "OPEN",
-                                                         Task.assignee_id.is_not(None)))).all()
+            tasks = (await db.scalars(select(Task).where(
+                Task.status == "OPEN", Task.assignee_id.is_not(None)))).all()
             for task in tasks:
                 assignment = await latest_assignment_event(db, task.id)
                 if assignment is None:
@@ -144,22 +146,36 @@ async def schedule_weekly_reports(factory: async_sessionmaker[AsyncSession], *,
         async with db.begin():
             recipients = (await db.scalars(select(User).join(UserRole, UserRole.user_id == User.id)
                                            .where(User.status == "ACTIVE",
-                                                  UserRole.code.in_(["SUPER_ADMIN", "TEAM_LEAD"]))
+                                                  UserRole.code.in_(["SUPER_ADMIN", "TEAM_LEAD", "PM"]))
                                            .distinct())).all()
             for recipient in recipients:
                 saved = await db.scalar(select(WeeklyReport).where(
                     WeeklyReport.recipient_user_id == recipient.id,
                     WeeklyReport.week_start == week_start))
                 if saved is not None:
+                    # Repair a report committed by an older worker without its
+                    # notification. The unique notification key makes this safe
+                    # on every later tick.
+                    queued += await put_notification(
+                        db, recipient_id=recipient.id, kind="WEEKLY_REPORT",
+                        key=f"weekly:{week_start}:{recipient.id}",
+                        body=report_message(saved.payload), scheduled_at=stamp)
                     continue
                 payload = await build_weekly_report(db, recipient, at=stamp)
-                try:
-                    async with db.begin_nested():
-                        db.add(WeeklyReport(recipient_user_id=recipient.id,
-                                            week_start=week_start, generated_at=stamp,
-                                            payload=payload))
-                        await db.flush()
-                except IntegrityError:
+                dialect = db.get_bind().dialect.name
+                if dialect == "postgresql":
+                    insert = pg_insert
+                elif dialect == "sqlite":
+                    insert = sqlite_insert
+                else:
+                    raise RuntimeError("Unsupported weekly report database dialect")
+                statement = insert(WeeklyReport).values(
+                    id=uuid4(), recipient_user_id=recipient.id, week_start=week_start,
+                    generated_at=stamp, payload=payload).on_conflict_do_nothing(
+                        index_elements=[WeeklyReport.recipient_user_id,
+                                        WeeklyReport.week_start])
+                result = await db.execute(statement)
+                if result.rowcount == 0:
                     continue
                 queued += await put_notification(
                     db, recipient_id=recipient.id, kind="WEEKLY_REPORT",

@@ -28,6 +28,7 @@ async def task_response(db, actor, task: Task) -> dict:
 class TaskCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: UUID
+    sprint_id: UUID | None = None
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=30000)
     assignee_id: UUID | None = None
