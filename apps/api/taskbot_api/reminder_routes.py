@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
-from taskbot_api.models import Notification, PersonalReminder, now, utc
+from taskbot_api.models import Notification, PersonalReminder, User, now, utc
 from taskbot_api.routes import mutation
 from taskbot_api.security import CurrentUser, Db
 from taskbot_api.task_service import visible_task
@@ -50,11 +50,14 @@ def validate_time(value: datetime) -> datetime:
     return instant
 
 
-def queue_reminder(db: Db, row: PersonalReminder) -> None:
+async def queue_reminder(db: Db, row: PersonalReminder, actor: User) -> None:
+    task = await visible_task(db, actor, row.task_id) if row.task_id else None
+    context = (f" по задаче {task.task_key} «{task.title}»" if task else "")
     db.add(Notification(recipient_user_id=row.owner_user_id, task_id=row.task_id,
                         kind="PERSONAL_REMINDER",
                         dedupe_key=f"personal_reminder:{row.id}:{row.version}",
-                        body=row.text, scheduled_at=row.remind_at, state="PENDING"))
+                        body=f"Напоминание{context}: {row.text}",
+                        scheduled_at=row.remind_at, state="PENDING"))
 
 
 @router.get("")
@@ -80,7 +83,7 @@ async def create_reminder(body: ReminderCreate, request: Request,
             raise HTTPException(422, "REMINDER_TEXT_REQUIRED")
         db.add(row)
         await db.flush()
-        queue_reminder(db, row)
+        await queue_reminder(db, row, actor)
         return 201, reminder_json(row)
 
     return await mutation(request, db, actor, body, "reminders:create", perform)
@@ -89,12 +92,20 @@ async def create_reminder(body: ReminderCreate, request: Request,
 @router.patch("/{reminder_id}")
 async def edit_reminder(reminder_id: UUID, body: ReminderEdit, request: Request,
                         db: Db, actor: CurrentUser) -> Response:
+    existing = await db.get(PersonalReminder, reminder_id)
+    if existing is None or existing.owner_user_id != actor.id or existing.cancelled_at is not None:
+        raise HTTPException(404, "NOT_FOUND")
+    if existing.task_id:
+        await visible_task(db, actor, existing.task_id)
+
     async def perform() -> tuple[int, dict]:
         row = await db.get(PersonalReminder, reminder_id, with_for_update=True)
         if row is None or row.owner_user_id != actor.id or row.cancelled_at is not None:
             raise HTTPException(404, "NOT_FOUND")
         if row.version != body.expected_version:
             raise HTTPException(409, "VERSION_CONFLICT")
+        if row.task_id:
+            await visible_task(db, actor, row.task_id)
         if body.remind_at is not None:
             row.remind_at = validate_time(body.remind_at)
         if body.text is not None:
@@ -102,7 +113,7 @@ async def edit_reminder(reminder_id: UUID, body: ReminderEdit, request: Request,
                 raise HTTPException(422, "REMINDER_TEXT_REQUIRED")
             row.text = body.text.strip()
         row.version += 1
-        queue_reminder(db, row)
+        await queue_reminder(db, row, actor)
         return 200, reminder_json(row)
 
     return await mutation(request, db, actor, body, f"reminders:edit:{reminder_id}", perform)

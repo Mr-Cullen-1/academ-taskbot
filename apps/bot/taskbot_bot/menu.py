@@ -448,7 +448,7 @@ async def commit_personal_reminder(factory: async_sessionmaker[AsyncSession], te
                     raise HTTPException(422, "REMINDER_TEXT_REQUIRED")
                 db.add(row)
                 await db.flush()
-                queue_reminder(db, row)
+                await queue_reminder(db, row, actor)
                 return "Готово: личное напоминание создано."
         except IntegrityError:
             await db.rollback()

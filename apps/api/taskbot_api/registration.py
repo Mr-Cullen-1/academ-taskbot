@@ -16,6 +16,8 @@ from taskbot_api.security import role_codes
 
 
 REQUESTABLE_ROLES = {"PM", "TEAM_LEAD", "SUBJECT_DEVELOPER", "QA"}
+ROLE_NAMES = {"PM": "менеджер проекта", "TEAM_LEAD": "руководитель команды",
+              "SUBJECT_DEVELOPER": "предметник-разработчик", "QA": "QA-проверяющий"}
 
 
 @dataclass(frozen=True)
@@ -140,7 +142,7 @@ async def submit_access_request(factory: async_sessionmaker[AsyncSession], *,
                     recipient_user_id=admin.id, subject_user_id=user.id,
                     kind="REGISTRATION_REQUEST",
                     dedupe_key=f"registration:{user.id}:request:{admin.id}",
-                    body=(f"Новая заявка: {user.name}. Роль: {role}. "
+                    body=(f"Заявка на доступ от {user.name}. Роль: {ROLE_NAMES.get(role, role)}. "
                           f"Проект: {project.name if project else 'не указан'}."),
                     scheduled_at=now(), state="PENDING",
                 ))
@@ -191,7 +193,10 @@ async def decide_pending_user(db: AsyncSession, actor: User, target: User, *,
         recipient_user_id=target.id, subject_user_id=target.id,
         kind="REGISTRATION_APPROVED" if status == "ACTIVE" else "REGISTRATION_REJECTED",
         dedupe_key=f"registration:{target.id}:decision",
-        body=("Ваша заявка одобрена. Откройте задачи через бота."
+        body=(("Ваша заявка одобрена. Назначенная роль: "
+               + ", ".join(ROLE_NAMES.get(code, code) for code in sorted(chosen))
+               + (f". Проект: {project.name}" if project else "")
+               + ". Откройте задачи через бота.")
               if status == "ACTIVE" else "Ваша заявка отклонена. Обратитесь к администратору."),
         scheduled_at=now(), state="PENDING",
     ))

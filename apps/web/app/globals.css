@@ -154,7 +154,6 @@ h4 { font-size: 1rem; }
 .managed-user summary strong { min-width: 0; overflow-wrap: anywhere; }
 .managed-user summary .badge { margin-left: auto; }
 .managed-user-body { padding: .1rem 1rem 1rem; border-top: 1px solid var(--line); }
-.managed-user-body fieldset { border: 1px solid var(--line); border-radius: 10px; margin: .8rem 0; }
 .managed-user-body fieldset label { display: inline-flex; align-items: center; margin-right: .8rem; min-height: 40px; }
 .user-actions .danger-button { margin-left: auto; }
 .tasks, .task-detail { min-width: 0; }
@@ -170,7 +169,8 @@ h4 { font-size: 1rem; }
 .task-detail ul, .task-detail ol { border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); padding: .8rem .8rem .8rem 2rem; }
 .task-detail li { padding: .35rem 0; overflow-wrap: anywhere; }
 .task-detail .actions { margin: .75rem 0 1.5rem; }
-.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem 1rem; }
+.form-grid { display: grid; min-width: 0; max-width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem 1rem; }
+.form-grid > * { min-width: 0; }
 .form-grid.surface { padding: 1.2rem; }
 .form-grid > h4, .form-grid > button { grid-column: 1 / -1; }
 .filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .65rem; margin: 0 0 1.2rem; padding: .85rem; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); }
@@ -178,13 +178,20 @@ h4 { font-size: 1rem; }
 .actions { display: flex; flex-wrap: wrap; gap: .5rem; }
 .application { margin: .75rem 0; padding: 1rem; }
 .application label { display: block; }
-.application fieldset { border: 1px solid var(--line); border-radius: 10px; margin: .8rem 0; }
-.application fieldset label { display: inline-flex; align-items: center; margin-right: .8rem; }
+.application fieldset, .managed-user-body fieldset, .planning-panel fieldset { min-inline-size: 0; max-width: 100%; border: 1px solid var(--line); border-radius: 10px; margin: .8rem 0; padding: .7rem .8rem; }
+.application legend, .managed-user-body legend, .planning-panel legend { max-width: 100%; padding: 0 .3rem; overflow-wrap: anywhere; }
+.application fieldset label { display: inline-flex; align-items: center; max-width: 100%; margin-right: .8rem; overflow-wrap: anywhere; }
 .application button { margin-right: .4rem; }
 label { display: block; margin: .55rem 0; color: #ccd5e8; font-size: .86rem; font-weight: 560; }
-input:not([type="checkbox"]), select, textarea { display: block; width: 100%; margin-top: .4rem; padding: .65rem .75rem; border: 1px solid #3b4863; border-radius: 10px; background: #10182b; color: var(--text); }
+input:not([type="checkbox"]), select, textarea { display: block; width: 100%; min-width: 0; max-width: 100%; margin-top: .4rem; padding: .65rem .75rem; border: 1px solid #3b4863; border-radius: 10px; background: #10182b; color: var(--text); }
 input[type="checkbox"] { width: 18px; height: 18px; min-height: 18px; margin-right: .5rem; accent-color: var(--primary); }
-textarea { min-height: 100px; resize: vertical; }
+textarea { min-height: 84px; line-height: 1.4; resize: vertical; }
+.planning-panel { min-width: 0; }
+.planning-panel ul { min-width: 0; padding-inline-start: 1.1rem; }
+.planning-panel li, .planning-panel li p, .planning-panel label { min-width: 0; overflow-wrap: anywhere; }
+.planning-panel fieldset label { display: flex; align-items: center; gap: .35rem; margin-right: 0; }
+.planning-panel fieldset input[type="checkbox"] { flex: none; margin-right: 0; }
+.planning-panel button, .task-detail .form-grid button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .auth-panel { max-width: 500px; margin: 9vh auto 0; padding: 2rem; }
 .auth-symbol { display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: 1.3rem; border-radius: 14px; background: #352668; color: #d5c6ff; }
 .auth-panel form { margin: 1.5rem 0; }

@@ -117,7 +117,8 @@ async def build_weekly_report(db: AsyncSession, recipient: User, *, at: datetime
 
 def report_message(payload: dict) -> str:
     totals = payload["totals"]
-    lines = [f"Отчёт Taskbot за {payload['week_start']} — {payload['week_end_exclusive']} (правая граница исключена)",
+    last_day = date.fromisoformat(payload["week_end_exclusive"]) - timedelta(days=1)
+    lines = [f"Отчёт Taskbot за неделю с {payload['week_start']} по {last_day.isoformat()}",
              f"Создано: {totals['created']}; завершено: {totals['completed']}; принято автором: {totals['accepted_by_author']}; исключительная приёмка: {totals['admin_approved']}.",
              f"Просрочено сейчас: {totals['current_overdue']}; ожидают проверки/приёмки: {totals['awaiting_review_or_acceptance']}.",
              f"В срок: {totals['on_time_current']} по текущей дате, {totals['on_time_original']} по исходной из {totals['completed']} завершённых."]

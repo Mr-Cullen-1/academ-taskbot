@@ -73,6 +73,9 @@ def test_outbox_idempotency_retry_recovery_and_private_api():
             assert await deliver_notifications(factory, fake, settings(), at=instant + timedelta(seconds=31)) == 1
             assert len(fake.sent) == 1
             assert fake.sent[0][2].inline_keyboard[0][0].text == "Принять"
+            assert fake.sent[0][2].inline_keyboard[0][0].callback_data == f"task:accept:{task_id}"
+            assert fake.sent[0][2].inline_keyboard[0][1].callback_data == f"task:reject:{task_id}"
+            assert "Вам назначена задача TASK-1001 «Lesson»" in fake.sent[0][1]
             assert await deliver_notifications(factory, fake, settings(), at=instant + timedelta(seconds=32)) == 0
             async with factory() as db:
                 attempts = (await db.scalars(select(NotificationAttempt))).all()
@@ -215,6 +218,7 @@ def test_deadline_reminders_reschedule_and_excluded_statuses():
                 rows = (await db.scalars(select(Notification).where(Notification.task_id == task_id))).all()
                 assert {row.kind for row in rows} == {"DUE_24H", "DUE_2H", "OVERDUE"}
                 assert len(rows) == 6
+                assert all('«Lesson»' in row.body for row in rows)
                 assert {row.scheduled_at.replace(tzinfo=timezone.utc) for row in rows
                         if row.kind == "DUE_24H"} == {datetime(2026, 10, 15, 19, tzinfo=timezone.utc)}
                 assert {row.scheduled_at.replace(tzinfo=timezone.utc) for row in rows
@@ -261,6 +265,8 @@ def test_working_calendar_and_reaction_stop():
                 reminder = await db.scalar(select(Notification).where(Notification.kind == "NO_REACTION"))
                 alert = await db.scalar(select(Notification).where(Notification.kind == "NO_RESPONSE_ALERT"))
                 assert reminder.scheduled_at.replace(tzinfo=timezone.utc) == trigger
+                assert '«Lesson»' in reminder.body
+                assert 'Person 704' in alert.body and '«Lesson»' in alert.body
                 assert alert.scheduled_at.replace(tzinfo=timezone.utc) == \
                     saturday.astimezone(timezone.utc) + timedelta(hours=1)
             async with factory() as db:
@@ -446,6 +452,8 @@ def test_report_delivery_scope_and_api():
             fake = FakeTransport()
             assert await deliver_notifications(factory, fake, settings(), at=instant) == 3
             assert len(fake.sent) == 3
+            assert all("за неделю с 2026-10-26 по 2026-11-01" in body
+                       and "правая граница исключена" not in body for _, body, _ in fake.sent)
             async with app.router.lifespan_context(app):
                 transport = httpx.ASGITransport(app=app)
                 async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as admin, \

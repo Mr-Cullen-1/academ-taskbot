@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from taskbot_api.config import Settings
 from taskbot_api.models import (
     DeadlineRequest, Notification, NotificationAttempt, OutboxEvent, PersonalReminder, ProjectMember, Task,
-    TaskEvent, User, WeeklyReport, now, utc,
+    TaskComment, TaskEvent, User, WeeklyReport, now, utc,
 )
 from taskbot_api.reporting import TASHKENT, report_projects
 from taskbot_api.registration import requested_access
@@ -144,27 +144,129 @@ def event_recipients(event: TaskEvent, task: Task) -> list[tuple[str, UUID]]:
 
 
 async def event_message(db: AsyncSession, task: Task, event: TaskEvent, kind: str) -> str:
+    label = f"{task.task_key} «{task.title}»" if task.title else task.task_key
+    actor = await db.get(User, event.actor_user_id) if event.actor_user_id else None
+    actor_name = actor.name if actor and actor.name else None
+
+    def extra(value: object, limit: int = 1000) -> str:
+        text = str(value or "").strip()
+        return text[:limit] + ("…" if len(text) > limit else "")
+
+    def with_reason(message: str, value: object) -> str:
+        detail = extra(value)
+        return f"{message}\nПричина: {detail}" if detail else message
+
+    after = event.after_data or {}
+    before = event.before_data or {}
     if kind == "DEADLINE_REQUEST":
-        return (f"Запрос продления {task.task_key}: {task.title}\n"
-                f"Предложенный срок: {event.after_data.get('proposed_due_date')}\n"
-                f"Причина: {str(event.after_data.get('reason', ''))[:1000]}\n"
-                f"Прогресс: {str(event.after_data.get('progress_note', ''))[:1000]}")
+        message = f"Запрошено продление срока задачи {label}."
+        if actor_name:
+            message += f"\nОтправитель запроса: {actor_name}."
+        current = before.get("current_due_date") or task.current_due_date
+        proposed = after.get("proposed_due_date")
+        if current:
+            message += f"\nТекущий срок: {current}."
+        if proposed:
+            message += f"\nПредложенный срок: {proposed}."
+        message = with_reason(message, after.get("reason"))
+        progress = extra(after.get("progress_note"))
+        return message + (f"\nПрогресс: {progress}" if progress else "") + "\nРассмотрите запрос."
     if kind == "DEADLINE_DECISION":
         decision = "одобрен" if event.type == "DEADLINE_APPROVED" else "отклонён"
-        return (f"Запрос продления {task.task_key} {decision}.\n"
-                f"Текущий срок: {task.current_due_date}" +
-                (f"\nПричина: {str(event.after_data['decision_reason'])[:1000]}"
-                 if event.after_data.get("decision_reason") else ""))
+        message = f"Запрос продления срока задачи {label} {decision}."
+        request_id = after.get("deadline_request_id")
+        try:
+            request = await db.get(DeadlineRequest, UUID(request_id)) if request_id else None
+        except (TypeError, ValueError):
+            request = None
+        if request and request.task_id == task.id:
+            message += f"\nПредложенный срок: {request.proposed_due_date}."
+        current = after.get("current_due_date") or task.current_due_date
+        if current:
+            message += f"\nТекущий срок: {current}."
+        return with_reason(message, after.get("decision_reason"))
     if kind == "ASSIGNED":
         author = await db.get(User, task.created_by)
-        return (f"Новая задача {task.task_key} от {author.name if author else 'автора'}\n"
-                f"{task.title}\n{task.description[:2500]}\n"
-                f"Дедлайн: {task.current_due_date}")
-    message = f"{task.task_key}: {kind.replace('_', ' ').lower()} — {task.title}"
-    reason = event.after_data.get("comment") or event.after_data.get("reason")
-    if reason:
-        message += f"\nКомментарий: {str(reason)[:1000]}"
-    return message
+        message = f"Вам назначена задача {label}."
+        if author and author.name:
+            message += f"\nАвтор: {author.name}."
+        if actor_name and event.type == "UPDATED" and event.actor_user_id != task.created_by:
+            message += f"\nНазначение от: {actor_name}."
+        if task.current_due_date:
+            message += f"\nСрок: {task.current_due_date}."
+        description = extra(task.description, 2400)
+        if description:
+            message += f"\nОписание: {description}"
+        return message + "\nПримите назначение или откажитесь, указав причину."
+    if kind == "ASSIGNMENT_REMOVED":
+        return f"Вы больше не исполнитель задачи {label}."
+    if kind == "TASK_UPDATED":
+        fields = {"title": "название", "description": "описание", "priority": "приоритет",
+                  "type": "тип", "assignee_id": "исполнитель", "current_due_date": "срок"}
+        changed = [name for field, name in fields.items()
+                   if field in before and field in after and before[field] != after[field]]
+        return (f"В задаче {label} изменены: {', '.join(changed)}." if changed
+                else f"Задача {label} обновлена.")
+    if kind == "QA_ASSIGNED":
+        return f"Вам назначена QA-проверка задачи {label}."
+    if kind == "QA_UNASSIGNED":
+        return f"С вас снята QA-проверка задачи {label}."
+    if kind == "REVIEW_REQUESTED":
+        message = f"Задача {label} отправлена на приёмку."
+        if actor_name:
+            message += f" Исполнитель: {actor_name}."
+        return message + " Проверьте результат."
+    if kind == "QA_REVIEW_REQUESTED":
+        return f"Задача {label} ожидает вашей QA-проверки."
+    if kind == "REWORK":
+        return with_reason(f"Задача {label} возвращена вам на доработку.",
+                           after.get("comment") or after.get("reason"))
+    if kind == "TASK_STATUS":
+        message = f"Задача {label} возвращена на доработку."
+        if actor_name:
+            message += f" Инициатор: {actor_name}."
+        return with_reason(message, after.get("comment") or after.get("reason"))
+    if kind == "QA_DONE":
+        return f"QA-проверка задачи {label} завершена. Задача ожидает приёмки."
+    if kind == "TASK_DONE":
+        if event.type == "ADMIN_APPROVE" or event.approval_mode == "ADMIN_OVERRIDE":
+            message = f"Задача {label} принята Super Admin в порядке исключительной приёмки."
+        else:
+            message = f"Задача {label} принята автором."
+        return message + (f"\nПринял: {actor_name}." if actor_name else "")
+    if kind == "TASK_CANCELLED":
+        message = f"Задача {label} отменена."
+        if actor_name:
+            message += f" Инициатор: {actor_name}."
+        return with_reason(message, after.get("reason"))
+    if kind == "TASK_BLOCKED":
+        message = f"По задаче {label} сообщено о блокировке выполнения."
+        if actor_name:
+            message += f" Исполнитель: {actor_name}."
+        return with_reason(message, after.get("reason"))
+    if kind == "ASSIGNMENT_RESPONSE":
+        action = {"ACCEPT": "назначение принято", "REJECT": "получен отказ от назначения",
+                  "START": "работа начата", "RESUME": "работа возобновлена"}.get(event.type)
+        if action:
+            message = f"По задаче {label}: {action}."
+            if actor_name:
+                message += f" Исполнитель: {actor_name}."
+            return with_reason(message, after.get("reason"))
+        return f"Получен ответ на назначение задачи {label}."
+    if kind == "TASK_COMMENT":
+        comment_id = after.get("comment_id")
+        try:
+            comment = await db.get(TaskComment, UUID(comment_id)) if comment_id else None
+        except (TypeError, ValueError):
+            comment = None
+        message = (f"Новый комментарий к задаче {label} от {actor_name}." if actor_name
+                   else f"Новый комментарий к задаче {label}.")
+        if comment and comment.task_id == task.id:
+            body = extra(comment.body, 1000)
+            if body:
+                message += f"\nКомментарий: {body}"
+        return message
+    return f"Обновление задачи {label}."
 
 
 async def record_outbox_failure(factory: async_sessionmaker[AsyncSession], item_id: UUID,

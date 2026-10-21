@@ -75,12 +75,15 @@ def test_registration_request_admin_buttons_and_rejected_delivery():
                     admin_note = await db.scalar(select(Notification).where(
                         Notification.kind == "REGISTRATION_REQUEST"))
                     assert admin_note.recipient_user_id == users[701]
+                    assert "Роль: предметник-разработчик" in admin_note.body
+                    assert "SUBJECT_DEVELOPER" not in admin_note.body
                 settings = Settings(_env_file=None, database_url=None, bot_token=TOKEN,
                                     notification_delivery_enabled=True,
                                     notification_transport="telegram")
                 fake = FakeTransport()
                 assert await deliver_notifications(factory, fake, settings) == 1
                 assert fake.sent[0][2].inline_keyboard[0][0].callback_data.startswith("reg:approve:")
+                assert fake.sent[0][2].inline_keyboard[0][1].callback_data == f"reg:reject:{candidate.id}"
                 await dispatcher.feed_update(bot, pressed(80105, 704, f"reg:approve:{candidate.id}"),
                                              registration_factory=factory)
                 async with factory() as db:
@@ -98,6 +101,7 @@ def test_registration_request_admin_buttons_and_rejected_delivery():
                     notes = (await db.scalars(select(Notification).where(
                         Notification.recipient_user_id == current.id))).all()
                     assert len(notes) == 1 and notes[0].kind == "REGISTRATION_APPROVED"
+                    assert "Назначенная роль: предметник-разработчик" in notes[0].body
                 assert await deliver_notifications(factory, fake, settings) == 1
                 assert fake.sent[-1][0] == 801
 

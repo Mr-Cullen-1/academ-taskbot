@@ -58,7 +58,7 @@ export default function PlanningPanel({ api, projectId, canManage, members }: {
     finally { setBusy(false); }
   }
 
-  return <div className="surface detail-section"><h2>Команды и спринты</h2>
+  return <div className="surface detail-section planning-panel"><h2>Команды и спринты</h2>
     {message && <p role="status">{message}</p>}
     <h3>Команды</h3>
     {teams.length ? <ul>{teams.map((team) => <li key={team.id}><strong>{team.name}</strong>

@@ -88,7 +88,7 @@ async def schedule_deadlines(factory: async_sessionmaker[AsyncSession], *,
                         queued += await put_notification(
                             db, recipient_id=user_id, task_id=task.id, kind=kind,
                             key=f"deadline:{kind}:{task.id}:{task.current_due_date}:{user_id}",
-                            body=f"{task.task_key}: {label}. Срок: {task.current_due_date}.",
+                            body=f"{label} по задаче {task.task_key} «{task.title}». Срок: {task.current_due_date}.",
                             scheduled_at=scheduled, due_date_snapshot=task.current_due_date)
     return queued
 
@@ -114,7 +114,7 @@ async def schedule_reaction_reminders(factory: async_sessionmaker[AsyncSession],
                     db, recipient_id=recipient.id, subject_user_id=recipient.id,
                     task_id=task.id, source_event_id=assignment.id, kind="NO_REACTION",
                     key=f"reaction:{assignment.id}:reminder:{recipient.id}",
-                    body=f"{task.task_key}: вы ещё не приняли назначенную задачу.",
+                    body=f"Вы ещё не ответили на назначение задачи {task.task_key} «{task.title}». Примите назначение или откажитесь, указав причину.",
                     scheduled_at=max(stamp, trigger))
                 alert_at = utc(assignment.occurred_at) + timedelta(hours=1)
                 lead_ids = (await db.scalars(
@@ -130,7 +130,7 @@ async def schedule_reaction_reminders(factory: async_sessionmaker[AsyncSession],
                         db, recipient_id=target_id, subject_user_id=recipient.id,
                         task_id=task.id, source_event_id=assignment.id, kind="NO_RESPONSE_ALERT",
                         key=f"reaction:{assignment.id}:alert:{target_id}",
-                        body=f"{task.task_key}: исполнитель не ответил на назначение в течение часа.",
+                        body=f"{recipient.name} не ответил на назначение задачи {task.task_key} «{task.title}» в течение часа.",
                         scheduled_at=max(stamp, alert_at))
     return queued
 
